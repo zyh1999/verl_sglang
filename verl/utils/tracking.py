@@ -78,8 +78,8 @@ class Tracking:
             # Define custom x-axis for per-optimizer-step critical sharpness metrics
             wandb.define_metric("actor/critical_step/optim_step")
             wandb.define_metric("actor/critical_step/*", step_metric="actor/critical_step/optim_step")
-            wandb.define_metric("actor/precond_step/optim_step")
-            wandb.define_metric("actor/precond_step/*", step_metric="actor/precond_step/optim_step")
+            wandb.define_metric("actor/precond_proxy_update/optim_step")
+            wandb.define_metric("actor/precond_proxy_update/*", step_metric="actor/precond_proxy_update/optim_step")
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:

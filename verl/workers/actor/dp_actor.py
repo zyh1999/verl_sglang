@@ -37,13 +37,7 @@ from verl.utils.critical_sharpness import (
     estimate_critical_sharpness,
     should_compute_critical_sharpness,
 )
-from verl.utils.precond_sharpness import (
-    aggregate_rollout_precond_sharpness,
-    estimate_precond_sharpness,
-    should_compute_precond_sharpness,
-)
 from verl.utils.ppo_actor_objective import evaluate_ppo_actor_objective
-from verl.utils.ppo_hvp_objective import evaluate_ppo_actor_objective_for_hvp
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -75,7 +69,6 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer = actor_optimizer
         self._total_optim_steps = 0  # cumulative optimizer step counter for NSR logging
         self._total_policy_updates = 0  # rollout/update_policy call counter for rollout-level sharpness
-        self._precond_warmstart = {}  # block_key -> power-iter eigenvector warm-start
         role = "Ref" if actor_optimizer is None else "Actor"
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
@@ -577,13 +570,6 @@ class DataParallelPPOActor(BasePPOActor):
         )
         rollout_critical_samples = []
 
-        compute_rollout_precond_sharpness = should_compute_precond_sharpness(
-            enabled=bool(self.config.get("log_precond_sharpness", False)),
-            rollout_step=rollout_step,
-            interval=max(int(self.config.get("precond_sharpness_interval", 1)), 1),
-        )
-        rollout_precond_samples = []
-
         for epoch_idx in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
@@ -702,6 +688,33 @@ class DataParallelPPOActor(BasePPOActor):
 
                 compute_critical_sharpness = compute_rollout_critical_sharpness
 
+                # Dense-step gate for optimizer-side precond proxy logging (adamw_precond path).
+                gstep = None
+                try:
+                    gstep = data.meta_info.get("global_steps", None)
+                    if gstep is None:
+                        gstep = data.meta_info.get("global_step", None)
+                    if gstep is None:
+                        gstep = data.meta_info.get("step", None)
+                except Exception:
+                    gstep = None
+                if gstep is None:
+                    self._local_global_step = getattr(self, "_local_global_step", 0) + 1
+                    gstep = self._local_global_step
+                gstep = int(gstep)
+                precond_interval = max(int(self.config.get("precond_sharpness_interval", 20)), 1)
+                dense_step = (gstep == 1) or (gstep % precond_interval == 0)
+                if hasattr(self.actor_optimizer, "set_global_step"):
+                    try:
+                        self.actor_optimizer.set_global_step(gstep)
+                    except Exception:
+                        pass
+                if hasattr(self.actor_optimizer, "set_dense_step"):
+                    try:
+                        self.actor_optimizer.set_dense_step(dense_step)
+                    except Exception:
+                        pass
+
                 theta_before = None
                 if compute_critical_sharpness:
                     params = self._iter_trainable_params()
@@ -745,49 +758,33 @@ class DataParallelPPOActor(BasePPOActor):
                         if "_critical_sharpness_per_optim_step" not in metrics:
                             metrics["_critical_sharpness_per_optim_step"] = []
                         metrics["_critical_sharpness_per_optim_step"].append(critical_step_entry)
+                # Pull optimizer-side precond proxy stats when available
+                if hasattr(self.actor_optimizer, "get_last_precond_stats"):
+                    try:
+                        opt_stats = self.actor_optimizer.get_last_precond_stats()
+                        if opt_stats:
+                            append_to_dict(metrics, opt_stats)
 
-                if compute_rollout_precond_sharpness:
-                    params = self._iter_trainable_params()
-                    def _eval_precond_loss_tensor():
-                        with torch.enable_grad():
-                            return evaluate_ppo_actor_objective_for_hvp(
-                                mini_batch=mini_batch,
-                                actor_module=self.actor_module,
-                                config=self.config,
-                                temperature=temperature,
-                                pad_token_id=pad_token_id,
-                                ulysses_sequence_parallel_size=self.ulysses_sequence_parallel_size,
-                            )
+                        logged_cnt = 0
+                        if hasattr(self.actor_optimizer, "pop_dense_series"):
+                            dense_series = self.actor_optimizer.pop_dense_series()
+                            if dense_series:
+                                if "_precond_proxy_series" not in metrics:
+                                    metrics["_precond_proxy_series"] = []
+                                metrics["_precond_proxy_series"].extend(dense_series)
+                                logged_cnt = len(dense_series)
 
-                    precond_metrics, precond_v_out = estimate_precond_sharpness(
-                        params=params,
-                        optimizer=self.actor_optimizer,
-                        evaluate_loss_fn=_eval_precond_loss_tensor,
-                        num_blocks=int(self.config.get("precond_sharpness_num_blocks", 8)),
-                        n_power_iter=int(self.config.get("precond_sharpness_n_power_iter", 5)),
-                        tol=float(self.config.get("precond_sharpness_tol", 1e-3)),
-                        named_params=self._iter_trainable_named_params(),
-                        init_v_blocks=self._precond_warmstart,
-                        sign_align=bool(self.config.get("precond_sharpness_sign_align", True)),
-                        jitter=float(self.config.get("precond_sharpness_warmstart_jitter", 0.0)),
-                    )
-                    if precond_v_out:
-                        self._precond_warmstart = precond_v_out
-                    if precond_metrics:
-                        rollout_precond_samples.append(precond_metrics)
-                        precond_step_entry = {
-                            "actor/precond_step/sharpness": precond_metrics.get("actor/precond_sharpness"),
-                            "actor/precond_step/optim_step": self._total_optim_steps,
-                        }
-                        if "_precond_sharpness_per_optim_step" not in metrics:
-                            metrics["_precond_sharpness_per_optim_step"] = []
-                        metrics["_precond_sharpness_per_optim_step"].append(precond_step_entry)
-                    else:
+                        metrics["actor/precond_proxy_update/count_per_step"] = float(logged_cnt)
+
+                        if opt_stats and dense_step and hasattr(self.actor_optimizer, "optim_step"):
+                            metrics["actor/precond_proxy_mark/optim_step"] = float(self.actor_optimizer.optim_step)
+                            metrics["actor/precond_proxy_mark/mean"] = opt_stats.get("actor/precond_proxy_mean")
+                            metrics["actor/precond_proxy_mark/std"] = opt_stats.get("actor/precond_proxy_std")
+                            metrics["actor/precond_proxy_mark/max"] = opt_stats.get("actor/precond_proxy_max")
+                            metrics["actor/precond_proxy_mark/n"] = opt_stats.get("actor/precond_proxy_n")
+                    except Exception as _e:
                         if torch.distributed.get_rank() == 0:
-                            print(
-                                f"[precond_sharpness][warn] empty metrics at optim_step={self._total_optim_steps}, rollout_step={rollout_step}",
-                                flush=True,
-                            )
+                            print(f"[adamw_precond][warn] failed to read optimizer precond stats: {_e}", flush=True)
 
                 # Compute Adam NSR metrics after every optimizer step when enabled.
                 # Return as time series so driver (ray_trainer) can log with custom x-axis.
@@ -807,13 +804,6 @@ class DataParallelPPOActor(BasePPOActor):
                 rollout_step=rollout_step,
             )
             append_to_dict(metrics, rollout_critical_metrics)
-
-        if compute_rollout_precond_sharpness:
-            rollout_precond_metrics = aggregate_rollout_precond_sharpness(
-                rollout_precond_samples,
-                rollout_step=rollout_step,
-            )
-            append_to_dict(metrics, rollout_precond_metrics)
 
         self._total_policy_updates += 1
         return metrics
