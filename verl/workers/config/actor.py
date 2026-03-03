@@ -155,6 +155,8 @@ class ActorConfig(BaseConfig):
     use_importance_sampling: bool = True
     # Ablation: disable PPO clipping (and dual-clip) in compute_policy_loss_vanilla
     disable_clip: bool = False
+    # Log Adam optimizer Signal-to-Noise Ratio (SNR) metrics per step.
+    log_adam_snr: bool = False
     use_kl_loss: bool = False
     # Whether to enable PrefixGrouper-based shared-prefix forward
     use_prefix_grouper: bool = False

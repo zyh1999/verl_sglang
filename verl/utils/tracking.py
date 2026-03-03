@@ -72,6 +72,9 @@ class Tracking:
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
             entity = os.environ.get("WANDB_ENTITY", None)
             wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
+            # Define custom x-axis for per-optimizer-step NSR metrics
+            wandb.define_metric("adam_nsr/optim_step")
+            wandb.define_metric("adam_nsr/*", step_metric="adam_nsr/optim_step")
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:

@@ -29,6 +29,7 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
+from verl.utils.adam_nsr_metrics import compute_adam_snr_metrics
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
@@ -60,6 +61,7 @@ class DataParallelPPOActor(BasePPOActor):
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        self._total_optim_steps = 0  # cumulative optimizer step counter for NSR logging
         role = "Ref" if actor_optimizer is None else "Actor"
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
@@ -663,7 +665,16 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
+                self._total_optim_steps += 1
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+
+                if self.config.get("log_adam_snr", False):
+                    adam_snr_metrics = compute_adam_snr_metrics(self.actor_optimizer)
+                    adam_snr_metrics["adam_nsr/optim_step"] = self._total_optim_steps
+                    if "_adam_nsr_per_step" not in metrics:
+                        metrics["_adam_nsr_per_step"] = []
+                    metrics["_adam_nsr_per_step"].append(adam_snr_metrics)
+
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics
