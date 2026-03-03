@@ -1457,6 +1457,8 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
                 adam_nsr_series = None
+                critical_sharpness_series = None
+                precond_sharpness_series = None
 
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(
@@ -1685,6 +1687,8 @@ class RayPPOTrainer:
                             actor_output = self._update_actor(batch)
                         # Pop per-optimizer-step NSR series before reduce_metrics (legacy: _adam_nsr_per_step; disable: actor/_adam_nsr_per_step)
                         adam_nsr_series = actor_output.meta_info["metrics"].pop("_adam_nsr_per_step", None) or actor_output.meta_info["metrics"].pop("actor/_adam_nsr_per_step", None)
+                        critical_sharpness_series = actor_output.meta_info["metrics"].pop("_critical_sharpness_per_optim_step", None) or actor_output.meta_info["metrics"].pop("actor/_critical_sharpness_per_optim_step", None)
+                        precond_sharpness_series = actor_output.meta_info["metrics"].pop("_precond_sharpness_per_optim_step", None) or actor_output.meta_info["metrics"].pop("actor/_precond_sharpness_per_optim_step", None)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
@@ -1768,7 +1772,9 @@ class RayPPOTrainer:
                 logger.log(data=metrics, step=self.global_steps)
 
                 # Log per-optimizer-step NSR with custom x-axis (optim_step)
+                # Keep "adam_nsr/optim_step" in data so wandb.define_metric(step_metric="adam_nsr/optim_step") can draw line charts
                 if adam_nsr_series:
+                    # With multiple DP workers, series can be list-of-lists (one list per worker); use first worker
                     if isinstance(adam_nsr_series[0], list):
                         adam_nsr_series = adam_nsr_series[0]
                     for nsr_entry in adam_nsr_series:
@@ -1777,6 +1783,31 @@ class RayPPOTrainer:
                         if "adam_nsr/optim_step" not in nsr_entry or not nsr_entry:
                             continue
                         logger.log(data=nsr_entry)
+
+                # Log per-optimizer-step critical sharpness with custom x-axis (optim_step)
+                # Keep actor/critical_sharpness_optim_step in data so wandb.define_metric(step_metric=...) can draw line charts
+                if critical_sharpness_series:
+                    # With multiple DP workers, series can be list-of-lists (one list per worker); use first worker
+                    if isinstance(critical_sharpness_series[0], list):
+                        critical_sharpness_series = critical_sharpness_series[0]
+                    for sharp_entry in critical_sharpness_series:
+                        if not isinstance(sharp_entry, dict):
+                            continue
+                        if "actor/critical_step/optim_step" not in sharp_entry or not sharp_entry:
+                            continue
+                        logger.log(data=sharp_entry)
+
+
+                # Log per-optimizer-step preconditioned-Hessian sharpness with custom x-axis (optim_step)
+                if precond_sharpness_series:
+                    if isinstance(precond_sharpness_series[0], list):
+                        precond_sharpness_series = precond_sharpness_series[0]
+                    for precond_entry in precond_sharpness_series:
+                        if not isinstance(precond_entry, dict):
+                            continue
+                        if "actor/precond_step/optim_step" not in precond_entry or not precond_entry:
+                            continue
+                        logger.log(data=precond_entry)
 
                 progress_bar.update(1)
                 self.global_steps += 1

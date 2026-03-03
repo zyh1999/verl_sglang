@@ -156,7 +156,31 @@ class ActorConfig(BaseConfig):
     # Ablation: disable PPO clipping (and dual-clip) in compute_policy_loss_vanilla
     disable_clip: bool = False
     # Log Adam optimizer Signal-to-Noise Ratio (SNR) metrics per step.
+    # Based on "In Search of Adam's Secret Sauce" (Orvieto & Gower, NeurIPS 2025).
+    # SNR = |m̂_t| / sqrt(v̂_t - m̂_t²), where m̂ and v̂ are bias-corrected moments.
     log_adam_snr: bool = False
+    # Log critical sharpness from
+    # "A Scalable Measure of Loss Landscape Curvature for Analyzing the Training Dynamics of LLMs":
+    # lambda_c = 2 / eta_c, where eta_c is the smallest step size along the update direction
+    # that increases the loss.
+    log_critical_sharpness: bool = False
+    # Rollout-step interval: every N update_policy calls, compute critical sharpness
+    # for all mini-batch optimizer updates in that rollout and log their mean/std.
+    critical_sharpness_interval: int = 20
+    critical_sharpness_eta_init: float = 1.0
+    critical_sharpness_max_expand_steps: int = 40
+    critical_sharpness_max_binary_steps: int = 20
+    critical_sharpness_binary_tol: float = 1e-2
+    critical_sharpness_eps: float = 1e-12
+
+    # Preconditioned-Hessian sharpness (block-diag, power iteration)
+    log_precond_sharpness: bool = False
+    precond_sharpness_interval: int = 20
+    precond_sharpness_num_blocks: int = 8
+    precond_sharpness_n_power_iter: int = 5
+    precond_sharpness_tol: float = 1e-3
+    precond_sharpness_sign_align: bool = True
+    precond_sharpness_warmstart_jitter: float = 0.0
     use_kl_loss: bool = False
     # Whether to enable PrefixGrouper-based shared-prefix forward
     use_prefix_grouper: bool = False

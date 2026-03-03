@@ -32,6 +32,18 @@ from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, u
 from verl.utils.adam_nsr_metrics import compute_adam_snr_metrics
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
+from verl.utils.critical_sharpness import (
+    aggregate_rollout_critical_sharpness,
+    estimate_critical_sharpness,
+    should_compute_critical_sharpness,
+)
+from verl.utils.precond_sharpness import (
+    aggregate_rollout_precond_sharpness,
+    estimate_precond_sharpness,
+    should_compute_precond_sharpness,
+)
+from verl.utils.ppo_actor_objective import evaluate_ppo_actor_objective
+from verl.utils.ppo_hvp_objective import evaluate_ppo_actor_objective_for_hvp
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -62,6 +74,8 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self._total_optim_steps = 0  # cumulative optimizer step counter for NSR logging
+        self._total_policy_updates = 0  # rollout/update_policy call counter for rollout-level sharpness
+        self._precond_warmstart = {}  # block_key -> power-iter eigenvector warm-start
         role = "Ref" if actor_optimizer is None else "Actor"
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
@@ -416,6 +430,12 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.step()
         return grad_norm
 
+    def _iter_trainable_params(self):
+        return [p for p in self.actor_module.parameters() if p.requires_grad]
+
+    def _iter_trainable_named_params(self):
+        return [(n, p) for n, p in self.actor_module.named_parameters() if p.requires_grad]
+
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy: bool = False) -> dict[str, torch.Tensor]:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
@@ -548,7 +568,23 @@ class DataParallelPPOActor(BasePPOActor):
             "actor/pg_loss": 0.0,
             "actor/kl_loss": 0.0,
         }
-        for _ in range(self.config.ppo_epochs):
+
+        rollout_step = self._total_policy_updates + 1
+        compute_rollout_critical_sharpness = should_compute_critical_sharpness(
+            enabled=bool(self.config.get("log_critical_sharpness", False)),
+            rollout_step=rollout_step,
+            interval=max(int(self.config.get("critical_sharpness_interval", 1)), 1),
+        )
+        rollout_critical_samples = []
+
+        compute_rollout_precond_sharpness = should_compute_precond_sharpness(
+            enabled=bool(self.config.get("log_precond_sharpness", False)),
+            rollout_step=rollout_step,
+            interval=max(int(self.config.get("precond_sharpness_interval", 1)), 1),
+        )
+        rollout_precond_samples = []
+
+        for epoch_idx in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
@@ -664,10 +700,97 @@ class DataParallelPPOActor(BasePPOActor):
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
+                compute_critical_sharpness = compute_rollout_critical_sharpness
+
+                theta_before = None
+                if compute_critical_sharpness:
+                    params = self._iter_trainable_params()
+                    # Store in bf16 to halve memory (theta_before, theta_after, direction)
+                    theta_before = [p.detach().clone().to(torch.bfloat16) for p in params]
+
                 grad_norm = self._optimizer_step()
                 self._total_optim_steps += 1
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
 
+                if compute_critical_sharpness and theta_before is not None:
+                    params = self._iter_trainable_params()
+                    theta_after = [p.detach().clone().to(torch.bfloat16) for p in params]
+                    critical_metrics = estimate_critical_sharpness(
+                        params=params,
+                        theta_before=theta_before,
+                        theta_after=theta_after,
+                        evaluate_loss_fn=lambda: evaluate_ppo_actor_objective(
+                            mini_batch=mini_batch,
+                            config=self.config,
+                            temperature=temperature,
+                            pad_token_id=pad_token_id,
+                            on_policy=on_policy,
+                            ulysses_sequence_parallel_size=self.ulysses_sequence_parallel_size,
+                            forward_micro_batch_fn=self._forward_micro_batch,
+                        ),
+                        eta_init=float(self.config.get("critical_sharpness_eta_init", 1.0)),
+                        max_expand_steps=int(self.config.get("critical_sharpness_max_expand_steps", 40)),
+                        max_binary_steps=int(self.config.get("critical_sharpness_max_binary_steps", 20)),
+                        binary_tol=float(self.config.get("critical_sharpness_binary_tol", 1e-2)),
+                        eps=float(self.config.get("critical_sharpness_eps", 1e-12)),
+                    )
+                    if critical_metrics:
+                        rollout_critical_samples.append(critical_metrics)
+                        critical_step_entry = {
+                            "actor/critical_step/lr": critical_metrics.get("actor/critical_lr"),
+                            "actor/critical_step/sharpness": critical_metrics.get("actor/critical_sharpness"),
+                            "actor/critical_step/loss_base": critical_metrics.get("actor/critical_loss_base"),
+                            "actor/critical_step/optim_step": self._total_optim_steps,
+                        }
+                        if "_critical_sharpness_per_optim_step" not in metrics:
+                            metrics["_critical_sharpness_per_optim_step"] = []
+                        metrics["_critical_sharpness_per_optim_step"].append(critical_step_entry)
+
+                if compute_rollout_precond_sharpness:
+                    params = self._iter_trainable_params()
+                    def _eval_precond_loss_tensor():
+                        with torch.enable_grad():
+                            return evaluate_ppo_actor_objective_for_hvp(
+                                mini_batch=mini_batch,
+                                actor_module=self.actor_module,
+                                config=self.config,
+                                temperature=temperature,
+                                pad_token_id=pad_token_id,
+                                ulysses_sequence_parallel_size=self.ulysses_sequence_parallel_size,
+                            )
+
+                    precond_metrics, precond_v_out = estimate_precond_sharpness(
+                        params=params,
+                        optimizer=self.actor_optimizer,
+                        evaluate_loss_fn=_eval_precond_loss_tensor,
+                        num_blocks=int(self.config.get("precond_sharpness_num_blocks", 8)),
+                        n_power_iter=int(self.config.get("precond_sharpness_n_power_iter", 5)),
+                        tol=float(self.config.get("precond_sharpness_tol", 1e-3)),
+                        named_params=self._iter_trainable_named_params(),
+                        init_v_blocks=self._precond_warmstart,
+                        sign_align=bool(self.config.get("precond_sharpness_sign_align", True)),
+                        jitter=float(self.config.get("precond_sharpness_warmstart_jitter", 0.0)),
+                    )
+                    if precond_v_out:
+                        self._precond_warmstart = precond_v_out
+                    if precond_metrics:
+                        rollout_precond_samples.append(precond_metrics)
+                        precond_step_entry = {
+                            "actor/precond_step/sharpness": precond_metrics.get("actor/precond_sharpness"),
+                            "actor/precond_step/optim_step": self._total_optim_steps,
+                        }
+                        if "_precond_sharpness_per_optim_step" not in metrics:
+                            metrics["_precond_sharpness_per_optim_step"] = []
+                        metrics["_precond_sharpness_per_optim_step"].append(precond_step_entry)
+                    else:
+                        if torch.distributed.get_rank() == 0:
+                            print(
+                                f"[precond_sharpness][warn] empty metrics at optim_step={self._total_optim_steps}, rollout_step={rollout_step}",
+                                flush=True,
+                            )
+
+                # Compute Adam NSR metrics after every optimizer step when enabled.
+                # Return as time series so driver (ray_trainer) can log with custom x-axis.
                 if self.config.get("log_adam_snr", False):
                     adam_snr_metrics = compute_adam_snr_metrics(self.actor_optimizer)
                     adam_snr_metrics["adam_nsr/optim_step"] = self._total_optim_steps
@@ -677,4 +800,20 @@ class DataParallelPPOActor(BasePPOActor):
 
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
+
+        if compute_rollout_critical_sharpness:
+            rollout_critical_metrics = aggregate_rollout_critical_sharpness(
+                rollout_critical_samples,
+                rollout_step=rollout_step,
+            )
+            append_to_dict(metrics, rollout_critical_metrics)
+
+        if compute_rollout_precond_sharpness:
+            rollout_precond_metrics = aggregate_rollout_precond_sharpness(
+                rollout_precond_samples,
+                rollout_step=rollout_step,
+            )
+            append_to_dict(metrics, rollout_precond_metrics)
+
+        self._total_policy_updates += 1
         return metrics
