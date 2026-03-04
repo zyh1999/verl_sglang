@@ -1817,7 +1817,7 @@ class RayPPOTrainer:
                             }
                         if "actor/precond_proxy_update/optim_step" not in payload or not payload:
                             continue
-                        logger.log(data=payload)
+                        logger.log(data=payload, step=self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1
