@@ -1805,6 +1805,16 @@ class RayPPOTrainer:
                     for payload in precond_proxy_series:
                         if not isinstance(payload, dict):
                             continue
+                        # Backward compatibility: optimizer may emit short keys
+                        # {optim_step, mean, std, max, n}. Normalize to wandb keys.
+                        if "actor/precond_proxy_update/optim_step" not in payload and "optim_step" in payload:
+                            payload = {
+                                "actor/precond_proxy_update/optim_step": payload.get("optim_step"),
+                                "actor/precond_proxy_update/mean": payload.get("mean"),
+                                "actor/precond_proxy_update/std": payload.get("std"),
+                                "actor/precond_proxy_update/max": payload.get("max"),
+                                "actor/precond_proxy_update/n": payload.get("n"),
+                            }
                         if "actor/precond_proxy_update/optim_step" not in payload or not payload:
                             continue
                         logger.log(data=payload)
