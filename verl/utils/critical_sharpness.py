@@ -25,7 +25,7 @@ from collections.abc import Callable
 import torch
 import torch.distributed as dist
 
-__all__ = ["estimate_critical_sharpness"]
+__all__ = ["estimate_critical_sharpness", "should_compute_critical_sharpness", "aggregate_rollout_critical_sharpness"]
 
 
 @torch.no_grad()
@@ -128,3 +128,47 @@ def estimate_critical_sharpness(
     finally:
         # Keep actor weights at post-update state for normal training flow.
         _set_params_from_snapshots(params, theta_after)
+
+
+def should_compute_critical_sharpness(*, enabled: bool, rollout_step: int, interval: int) -> bool:
+    if not enabled:
+        return False
+    interval = max(int(interval), 1)
+    rollout_step = int(rollout_step)
+    # keep same cadence convention as precond path: always log step1, then by interval
+    return rollout_step == 1 or (rollout_step > 0 and (rollout_step % interval == 0))
+
+
+def aggregate_rollout_critical_sharpness(samples: list[dict[str, float]], *, rollout_step: int) -> dict[str, float]:
+    if not samples:
+        return {}
+
+    def _vals(k: str):
+        out = []
+        for d in samples:
+            v = d.get(k)
+            if v is None:
+                continue
+            try:
+                out.append(float(v))
+            except Exception:
+                pass
+        return out
+
+    out: dict[str, float] = {
+        "actor/critical_rollout/step": float(rollout_step),
+        "actor/critical_rollout/count": float(len(samples)),
+    }
+    key_map = {
+        "actor/critical_sharpness": "actor/critical_rollout/sharpness",
+        "actor/critical_lr": "actor/critical_rollout/lr",
+        "actor/critical_loss_base": "actor/critical_rollout/loss_base",
+    }
+    for src, dst in key_map.items():
+        vals = _vals(src)
+        if not vals:
+            continue
+        out[f"{dst}/mean"] = float(sum(vals) / len(vals))
+        out[f"{dst}/max"] = float(max(vals))
+        out[f"{dst}/min"] = float(min(vals))
+    return out
