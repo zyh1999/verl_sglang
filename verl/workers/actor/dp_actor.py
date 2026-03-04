@@ -689,21 +689,9 @@ class DataParallelPPOActor(BasePPOActor):
                 compute_critical_sharpness = compute_rollout_critical_sharpness
 
                 # Dense-step gate for optimizer-side precond proxy logging (adamw_precond path).
-                gstep = None
-                try:
-                    gstep = data.meta_info.get("global_steps", None)
-                    if gstep is None:
-                        gstep = data.meta_info.get("global_step", None)
-                    if gstep is None:
-                        gstep = data.meta_info.get("step", None)
-                except Exception:
-                    gstep = None
-                if gstep is None:
-                    self._local_global_step = getattr(self, "_local_global_step", 0) + 1
-                    gstep = self._local_global_step
-                gstep = int(gstep)
+                # Gate by rollout/global step so selected global steps log dense local updates.
                 precond_interval = max(int(self.config.get("precond_sharpness_interval", 20)), 1)
-                dense_step = (gstep == 1) or (gstep % precond_interval == 0)
+                dense_step = (rollout_step == 1) or (rollout_step % precond_interval == 0)
                 if hasattr(self.actor_optimizer, "set_dense_step"):
                     try:
                         self.actor_optimizer.set_dense_step(dense_step)
