@@ -134,7 +134,7 @@ class Signum(Optimizer):
     def __init__(
         self,
         params,
-        lr: float = 1e-3,
+        lr: float = 1e-6,
         momentum: float = 0.9,
         weight_decay: float = 0.0,
     ):
