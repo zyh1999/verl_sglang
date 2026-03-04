@@ -704,11 +704,6 @@ class DataParallelPPOActor(BasePPOActor):
                 gstep = int(gstep)
                 precond_interval = max(int(self.config.get("precond_sharpness_interval", 20)), 1)
                 dense_step = (gstep == 1) or (gstep % precond_interval == 0)
-                if hasattr(self.actor_optimizer, "set_global_step"):
-                    try:
-                        self.actor_optimizer.set_global_step(gstep)
-                    except Exception:
-                        pass
                 if hasattr(self.actor_optimizer, "set_dense_step"):
                     try:
                         self.actor_optimizer.set_dense_step(dense_step)

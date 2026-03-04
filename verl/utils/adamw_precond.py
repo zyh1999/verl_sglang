@@ -9,13 +9,9 @@ class AdamWPrecond(torch.optim.AdamW):
         self.precond_stat_prefix = precond_stat_prefix
 
         self.optim_step = 0
-        self.current_global_step = None
         self.current_dense_step = False
         self._last_precond_stats = {}
         self._dense_series_buffer = []
-
-    def set_global_step(self, global_step):
-        self.current_global_step = global_step
 
     def set_dense_step(self, dense_step: bool):
         self.current_dense_step = bool(dense_step)
@@ -34,7 +30,7 @@ class AdamWPrecond(torch.optim.AdamW):
             self._last_precond_stats = {}
             return loss
 
-        # only collect/report on marked global steps: 1, 20, 40, ...
+        # collect/report only when the current global step is marked dense by upstream
         if not self._is_dense_step():
             self._last_precond_stats = {}
             self._dense_series_buffer = []
