@@ -155,7 +155,7 @@ echo "============================================================"
   data.filter_overlong_prompts=True \
   data.truncation='error' \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
-  +actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2 \
+  +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
   actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \

@@ -9,7 +9,7 @@
 #SBATCH --error=/scratch/u6g/zhouyihe.u6g/verl_v0.4.x/slurm_logs/%x_%j.err
 set -euo pipefail
 TS=$(date +%Y%m%d_%H%M%S)
-EXP_NAME=qwen25_3b_math_orig_adamw_precond_pe3_fa2_${TS}
+EXP_NAME=qwen25_3b_math_orig_adamw_precond_pe3_sdpa_${TS}
 REPO_IN_CONT=/mnt/home/verl_v0.4.x
 mkdir -p /scratch/u6g/zhouyihe.u6g/verl_v0.4.x/slurm_logs
 
