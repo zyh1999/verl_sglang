@@ -124,6 +124,8 @@ offload="${OFFLOAD:-False}"
 # rollout inference engine: sglang | vllm | hf
 # 你环境里没装 vllm 时会报 `No module named 'vllm'`，因此默认用 sglang（可用 ROLLOUT_NAME 覆盖）
 rollout_name="${ROLLOUT_NAME:-sglang}"
+# attention impl: sdpa | flash_attention_2
+attn_impl="${ATTN_IMPL:-sdpa}"
 
 # 日志/输出
 out_dir="${OUT_DIR:-./outputs/${project_name}/${exp_name}}"
@@ -143,6 +145,7 @@ echo "val_n=${val_n}, val_do_sample=${val_do_sample}, val_temp=${val_temperature
 echo "val_subset_ratio=${val_subset_ratio}"
 echo "val_subset_seed=${val_subset_seed}, val_subset_resample_each_eval=${val_subset_resample_each_eval}"
 echo "use_importance_sampling=${use_importance_sampling}"
+echo "attn_impl=${attn_impl}"
 echo "============================================================"
 
 "${PYTHON_BIN}" -m verl.trainer.main_ppo \
@@ -155,7 +158,7 @@ echo "============================================================"
   data.filter_overlong_prompts=True \
   data.truncation='error' \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
-  +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
+  actor_rollout_ref.model.override_config.attn_implementation="${attn_impl}" \
   actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
