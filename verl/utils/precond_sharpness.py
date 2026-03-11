@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 from typing import Callable
+import os
 import re
 import traceback
 
 import torch
+
+
+def _fmt_cuda_mem(tag: str) -> str:
+    if not torch.cuda.is_available():
+        return f"{tag} cuda=na"
+    d = torch.cuda.current_device()
+    alloc = torch.cuda.memory_allocated(d) / (1024**3)
+    reserv = torch.cuda.memory_reserved(d) / (1024**3)
+    peak = torch.cuda.max_memory_allocated(d) / (1024**3)
+    return f"{tag} cuda_alloc={alloc:.3f}GiB reserved={reserv:.3f}GiB peak={peak:.3f}GiB"
+
 
 __all__ = [
     "should_compute_precond_sharpness",
@@ -150,6 +162,9 @@ def _hvp_block(
     block_params: list[torch.nn.Parameter],
     vec: list[torch.Tensor],
 ) -> list[torch.Tensor]:
+    mem_debug = (os.getenv("HVP_MEM_DEBUG", "0") == "1")
+    if mem_debug and torch.cuda.is_available():
+        print(f"[hvp_mem] {_fmt_cuda_mem('pre_hvp_loss')}", flush=True)
     loss_obj = evaluate_loss_fn()
     loss = _coerce_loss_tensor(loss_obj)
     if not isinstance(loss, torch.Tensor):
@@ -160,6 +175,13 @@ def _hvp_block(
             "Please return a differentiable tensor loss from evaluate_loss_fn()."
         )
     g = torch.autograd.grad(loss, block_params, create_graph=True, allow_unused=True)
+    if mem_debug:
+        print(f"[hvp_mem] {_fmt_cuda_mem('post_first_grad')}", flush=True)
+    used = [gi for gi in g if gi is not None]
+    if len(used) == 0:
+        shapes = [tuple(p.shape) for p in block_params[:4]]
+        print(f"[precond_sharpness][debug] all_none_first_grad: n_params={len(block_params)} sample_shapes={shapes}", flush=True)
+        raise RuntimeError("all first-order grads are None in HVP path")
     dot = sum(
         ((gi if gi is not None else torch.zeros_like(p)).flatten().dot(v.flatten()))
         for gi, v, p in zip(g, vec, block_params)
@@ -173,6 +195,8 @@ def _hvp_block(
             print(f"[precond_sharpness][debug] dot.no_grad: non_none_g={non_none}/{len(g)} req_g={req} p0_type={p0_type} p0_req={getattr(p0,'requires_grad',None)}", flush=True)
         raise RuntimeError("dot does not require grad in HVP path")
     hv = torch.autograd.grad(dot, block_params, retain_graph=False, allow_unused=True)
+    if mem_debug:
+        print(f"[hvp_mem] {_fmt_cuda_mem('post_hvp_grad')}", flush=True)
     return [(hi if hi is not None else torch.zeros_like(p)) for hi, p in zip(hv, block_params)]
 
 

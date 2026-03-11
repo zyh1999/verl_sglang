@@ -40,15 +40,15 @@ nnodes="${NNODES:-1}"
 data_root="${DATA_ROOT:-${ROOT_DIR}/data}"
 gsm8k_train_path="${GSM8K_TRAIN_PATH:-$data_root/gsm8k/train.parquet}"
 gsm8k_test_path="${GSM8K_TEST_PATH:-$data_root/gsm8k/test.parquet}"
-# 训练用的 “math7500”：使用 SeRL 提供的 7.5k GT（data/serl_math/train.parquet）
-math_train_path="${MATH_TRAIN_PATH:-$data_root/serl_math/train.parquet}"
-math_test_path="${MATH_TEST_PATH:-$data_root/serl_math/test.parquet}"
-math500_test_path="${MATH500_TEST_PATH:-$data_root/serl_math/test.parquet}"
-math_hard_test_path="${MATH_HARD_TEST_PATH:-$data_root/serl_math_hard/test.parquet}"
+# 训练用的 “math7500”：使用 SeRL 提供的 7.5k GT（data/math_task/train.parquet）
+math_train_path="${MATH_TRAIN_PATH:-$data_root/math_task/train.parquet}"
+math_test_path="${MATH_TEST_PATH:-$data_root/math_task/test.parquet}"
+math500_test_path="${MATH500_TEST_PATH:-$data_root/math_task/test.parquet}"
+math_hard_test_path="${MATH_HARD_TEST_PATH:-$data_root/math_task_hard/test.parquet}"
 
-# 训练集：默认跑 GSM8K + Math（你这里口径的 “math7500” 就是 data/math/train.parquet）
+# 训练集：默认只跑 math_task/train.parquet（约 7.5k）
 # 可用环境变量 TRAIN_FILES 覆盖
-train_files="${TRAIN_FILES:-['$gsm8k_train_path','$math_train_path']}"
+train_files="${TRAIN_FILES:-['$math_train_path']}"
 # 测试集：同时跑 Math500 + math_hard，并在日志里按 data_source 分开汇报
 test_files="${TEST_FILES:-['$math500_test_path','$math_hard_test_path']}"
 
@@ -73,7 +73,7 @@ max_response_length="${MAX_RESPONSE_LENGTH:-2048}"
 train_prompt_bsz="${TRAIN_PROMPT_BSZ:-64}"
 train_prompt_mini_bsz="${TRAIN_PROMPT_MINI_BSZ:-16}"
 micro_batch_size_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-16}"
-ppo_epochs="${PPO_EPOCHS:-3}"
+ppo_epochs="${PPO_EPOCHS:-1}"
 
 project_name="${PROJECT_NAME:-verl_grpo_example_math}"
 # 默认 run 名（用于 wandb 曲线/输出目录）：体现 IS + 训练集/测试集
@@ -124,8 +124,6 @@ offload="${OFFLOAD:-False}"
 # rollout inference engine: sglang | vllm | hf
 # 你环境里没装 vllm 时会报 `No module named 'vllm'`，因此默认用 sglang（可用 ROLLOUT_NAME 覆盖）
 rollout_name="${ROLLOUT_NAME:-sglang}"
-# attention impl: sdpa | flash_attention_2
-attn_impl="${ATTN_IMPL:-sdpa}"
 
 # 日志/输出
 out_dir="${OUT_DIR:-./outputs/${project_name}/${exp_name}}"
@@ -145,7 +143,6 @@ echo "val_n=${val_n}, val_do_sample=${val_do_sample}, val_temp=${val_temperature
 echo "val_subset_ratio=${val_subset_ratio}"
 echo "val_subset_seed=${val_subset_seed}, val_subset_resample_each_eval=${val_subset_resample_each_eval}"
 echo "use_importance_sampling=${use_importance_sampling}"
-echo "attn_impl=${attn_impl}"
 echo "============================================================"
 
 "${PYTHON_BIN}" -m verl.trainer.main_ppo \
@@ -158,8 +155,7 @@ echo "============================================================"
   data.filter_overlong_prompts=True \
   data.truncation='error' \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
-  actor_rollout_ref.model.override_config.attn_implementation="${attn_impl}" \
-  actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
+  +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.actor.use_dynamic_bsz="${use_dynamic_bsz}" \

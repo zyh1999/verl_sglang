@@ -30,13 +30,10 @@ def evaluate_ppo_actor_objective(
     pad_token_id: int,
     on_policy: bool,
     ulysses_sequence_parallel_size: int,
-    forward_micro_batch_fn: Callable[..., dict[str, Any]],
-    return_tensor: bool = False,
+    forward_micro_batch_fn: Callable[..., dict[str, Any]]
 ):
     """Evaluate the same PPO actor objective used for update.
 
-    If return_tensor=True, returns a differentiable scalar Tensor for HVP usage.
-    Otherwise returns Python float (legacy behavior).
     """
     if config.use_dynamic_bsz:
         max_token_len = config.ppo_max_token_len_per_gpu * ulysses_sequence_parallel_size
@@ -102,6 +99,4 @@ def evaluate_ppo_actor_objective(
         # no micro-batch case, keep type stable
         total_objective = policy_loss.new_tensor(0.0)
 
-    if return_tensor:
-        return total_objective
     return float(total_objective.detach().item())

@@ -40,15 +40,15 @@ nnodes="${NNODES:-1}"
 data_root="${DATA_ROOT:-${ROOT_DIR}/data}"
 gsm8k_train_path="${GSM8K_TRAIN_PATH:-$data_root/gsm8k/train.parquet}"
 gsm8k_test_path="${GSM8K_TEST_PATH:-$data_root/gsm8k/test.parquet}"
-# 训练用的 “math7500”：使用 SeRL 提供的 7.5k GT（data/serl_math/train.parquet）
-math_train_path="${MATH_TRAIN_PATH:-$data_root/serl_math/train.parquet}"
-math_test_path="${MATH_TEST_PATH:-$data_root/serl_math/test.parquet}"
-math500_test_path="${MATH500_TEST_PATH:-$data_root/serl_math/test.parquet}"
-math_hard_test_path="${MATH_HARD_TEST_PATH:-$data_root/serl_math_hard/test.parquet}"
+# 训练用的 “math7500”：使用 SeRL 提供的 7.5k GT（data/math_task/train.parquet）
+math_train_path="${MATH_TRAIN_PATH:-$data_root/math_task/train.parquet}"
+math_test_path="${MATH_TEST_PATH:-$data_root/math_task/test.parquet}"
+math500_test_path="${MATH500_TEST_PATH:-$data_root/math_task/test.parquet}"
+math_hard_test_path="${MATH_HARD_TEST_PATH:-$data_root/math_task_hard/test.parquet}"
 
-# 训练集：默认跑 GSM8K + Math（你这里口径的 “math7500” 就是 data/math/train.parquet）
+# 训练集：默认只跑 math_task/train.parquet（约 7.5k）
 # 可用环境变量 TRAIN_FILES/TEST_FILES 覆盖
-train_files="${TRAIN_FILES:-['$gsm8k_train_path','$math_train_path']}"
+train_files="${TRAIN_FILES:-['$math_train_path']}"
 # 测试集：同时跑 Math500 + math_hard，并在日志里按 data_source 分开汇报
 test_files="${TEST_FILES:-['$math500_test_path','$math_hard_test_path']}"
 

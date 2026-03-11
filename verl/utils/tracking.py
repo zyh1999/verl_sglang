@@ -80,6 +80,12 @@ class Tracking:
             wandb.define_metric("actor/critical_step/*", step_metric="actor/critical_step/optim_step")
             wandb.define_metric("actor/precond_proxy_update/optim_step")
             wandb.define_metric("actor/precond_proxy_update/*", step_metric="actor/precond_proxy_update/optim_step")
+            wandb.define_metric("actor/precond_proxy_update_front/optim_step")
+            wandb.define_metric("actor/precond_proxy_update_front/*", step_metric="actor/precond_proxy_update_front/optim_step")
+            wandb.define_metric("actor/precond_proxy_update_mid/optim_step")
+            wandb.define_metric("actor/precond_proxy_update_mid/*", step_metric="actor/precond_proxy_update_mid/optim_step")
+            wandb.define_metric("actor/precond_proxy_update_back/optim_step")
+            wandb.define_metric("actor/precond_proxy_update_back/*", step_metric="actor/precond_proxy_update_back/optim_step")
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:

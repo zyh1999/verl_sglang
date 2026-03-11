@@ -6,6 +6,7 @@ forward kernels that may break higher-order gradients.
 
 from collections.abc import Callable
 from typing import Any
+import os
 
 import torch
 
@@ -14,6 +15,55 @@ from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id
 from verl.utils.seqlen_balancing import prepare_dynamic_batch
 from verl.utils.torch_functional import logprobs_from_logits_v2
+
+
+def _unwrap_module(m: torch.nn.Module) -> torch.nn.Module:
+    cur = m
+    # unwrap common wrappers (DDP/FSDP style .module chains)
+    for _ in range(6):
+        nxt = getattr(cur, "module", None)
+        if nxt is None or nxt is cur:
+            break
+        cur = nxt
+    return cur
+
+
+def _find_last_transformer_block(actor_module: torch.nn.Module) -> torch.nn.Module | None:
+    base = _unwrap_module(actor_module)
+
+    # Common HF layouts
+    candidates = []
+    model = getattr(base, "model", None)
+    if model is not None:
+        layers = getattr(model, "layers", None)
+        if layers is not None:
+            candidates.append(layers)
+    transformer = getattr(base, "transformer", None)
+    if transformer is not None:
+        h = getattr(transformer, "h", None)
+        if h is not None:
+            candidates.append(h)
+    layers2 = getattr(base, "layers", None)
+    if layers2 is not None:
+        candidates.append(layers2)
+
+    for seq in candidates:
+        try:
+            if len(seq) > 0:
+                return seq[-1]
+        except Exception:
+            continue
+    return None
+
+
+def _fmt_cuda_mem(tag: str) -> str:
+    if not torch.cuda.is_available():
+        return f"{tag} cuda=na"
+    d = torch.cuda.current_device()
+    alloc = torch.cuda.memory_allocated(d) / (1024**3)
+    reserv = torch.cuda.memory_reserved(d) / (1024**3)
+    peak = torch.cuda.max_memory_allocated(d) / (1024**3)
+    return f"{tag} cuda_alloc={alloc:.3f}GiB reserved={reserv:.3f}GiB peak={peak:.3f}GiB"
 
 
 def evaluate_ppo_actor_objective_for_hvp(
@@ -30,6 +80,7 @@ def evaluate_ppo_actor_objective_for_hvp(
     Notes:
     - Uses vanilla logits->logprob path (logprobs_from_logits_v2) to keep grad graph.
     - Avoids fused CE / custom kernels in this HVP path.
+    - Supports token subsampling via config.hvp_token_stride (e.g., 4 => use 1/4 tokens).
     """
     if config.use_dynamic_bsz:
         max_token_len = config.ppo_max_token_len_per_gpu * ulysses_sequence_parallel_size
@@ -41,6 +92,13 @@ def evaluate_ppo_actor_objective_for_hvp(
 
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
     policy_loss_fn = get_policy_loss_fn(loss_mode)
+    hvp_token_stride = int(getattr(config, "hvp_token_stride", 1))
+    hvp_token_stride = max(hvp_token_stride, 1)
+
+    # Optional hard graph-cut before the last transformer block for HVP path.
+    # This ensures higher-order graph stays local to the last block.
+    hvp_detach_last_block_input = bool(getattr(config, "hvp_detach_last_block_input", False))
+    hvp_mem_debug = bool(getattr(config, "hvp_mem_debug", False) or (os.getenv("HVP_MEM_DEBUG", "0") == "1"))
 
     total_objective = None
     for mb in micro_batches:
@@ -55,13 +113,37 @@ def evaluate_ppo_actor_objective_for_hvp(
         advantages = b["advantages"]
         old_log_prob = b["old_log_probs"]
 
-        out = actor_module(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            use_cache=False,
-            pad_token_id=pad_token_id,
-        )
+        hook = None
+        if hvp_detach_last_block_input:
+            last_block = _find_last_transformer_block(actor_module)
+            if last_block is not None:
+                def _pre_hook(_module, args):
+                    if not args:
+                        return args
+                    x0 = args[0]
+                    if isinstance(x0, torch.Tensor):
+                        x0 = x0.detach().requires_grad_(True)
+                        return (x0,) + tuple(args[1:])
+                    return args
+
+                hook = last_block.register_forward_pre_hook(_pre_hook)
+
+        try:
+            if hvp_mem_debug and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                print(f"[hvp_mem] {_fmt_cuda_mem('before_forward')}", flush=True)
+            out = actor_module(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=False,
+                pad_token_id=pad_token_id,
+            )
+            if hvp_mem_debug:
+                print(f"[hvp_mem] {_fmt_cuda_mem('after_forward')}", flush=True)
+        finally:
+            if hook is not None:
+                hook.remove()
         logits = out.logits
         response_length = responses.size(-1)
         logits = logits[:, -response_length - 1 : -1, :]

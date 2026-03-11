@@ -1,80 +1,140 @@
+import os
 import torch
-
+import verl.utils.precond_sharpness as ps
 
 
 class AdamWPrecond(torch.optim.AdamW):
-    def __init__(self, params, *args, log_precond_stats: bool = False, precond_stat_prefix: str = "actor", **kwargs):
+    def __init__(
+        self,
+        params,
+        *args,
+        log_precond_stats: bool = False,
+        precond_stat_prefix: str = "actor",
+        precond_n_power_iter: int = 5,
+        precond_tol: float = 1e-3,
+        **kwargs,
+    ):
         super().__init__(params, *args, **kwargs)
         self.log_precond_stats = bool(log_precond_stats)
         self.precond_stat_prefix = precond_stat_prefix
+        self.precond_n_power_iter = int(precond_n_power_iter)
+        self.precond_tol = float(precond_tol)
 
         self.optim_step = 0
         self.current_dense_step = False
         self._last_precond_stats = {}
         self._dense_series_buffer = []
+        self._named_params_cache = []
+        self._v_cache = {}
 
     def set_dense_step(self, dense_step: bool):
         self.current_dense_step = bool(dense_step)
 
+    def set_named_params(self, named_params):
+        self._named_params_cache = list(named_params) if named_params is not None else []
+
     def _is_dense_step(self):
-        # Dense-window control is decided by the trainer/actor and injected via
-        # set_dense_step(). Do not infer from optim_step/global_step here.
         return bool(self.current_dense_step)
 
-    @torch.no_grad()
+    def _pick_three_blocks(self):
+        named = [(n, p) for n, p in self._named_params_cache if p is not None and p.requires_grad]
+        if not named:
+            return {}
+
+        blocks = ps._split_blocks_by_transformer_layer(named)
+        layer_blocks = [(k, v) for k, v in blocks if k.startswith("layer_") and len(v) > 0]
+
+        chosen = {}
+        if len(layer_blocks) >= 3:
+            chosen = {
+                "front": (layer_blocks[0][0], list(layer_blocks[0][1])),
+                "mid": (layer_blocks[len(layer_blocks) // 2][0], list(layer_blocks[len(layer_blocks) // 2][1])),
+                "back": (layer_blocks[-1][0], list(layer_blocks[-1][1])),
+            }
+        elif len(layer_blocks) > 0:
+            tags = ["front", "mid", "back"]
+            for i, (name, plist) in enumerate(layer_blocks[:3]):
+                chosen[tags[i]] = (name, list(plist))
+        else:
+            vals = [p for _, p in named]
+            u = ps._split_blocks(vals, 3)
+            tags = ["front", "mid", "back"]
+            for i, (uname, ps_blk) in enumerate(u[:3]):
+                chosen[tags[i]] = (uname, list(ps_blk))
+
+        return chosen
+
     def step(self, closure=None):
         loss = super().step(closure=closure)
         self.optim_step += 1
 
-        if not self.log_precond_stats:
+        if not self.log_precond_stats or (not self._is_dense_step()) or (closure is None):
             self._last_precond_stats = {}
             return loss
 
-        # collect/report only when the current global step is marked dense by upstream
-        if not self._is_dense_step():
+        chosen = self._pick_three_blocks()
+        if not chosen:
             self._last_precond_stats = {}
-            self._dense_series_buffer = []
             return loss
 
-        vals = []
-        for group in self.param_groups:
-            eps = float(group.get("eps", 1e-8))
-            for p in group.get("params", []):
-                if p is None:
-                    continue
-                st = self.state.get(p, None)
-                if not st:
-                    continue
-                m = st.get("exp_avg", None)
-                v = st.get("exp_avg_sq", None)
-                if m is None or v is None:
-                    continue
-                u = (m.abs() / (v.sqrt() + eps)).mean()
-                if torch.isfinite(u):
-                    vals.append(float(u.item()))
+        per_block = {}
+        dense_payloads = []
 
-        if vals:
-            mean = float(sum(vals) / len(vals))
-            var = float(sum((x - mean) ** 2 for x in vals) / len(vals))
-            self._last_precond_stats = {
-                f"{self.precond_stat_prefix}/precond_proxy_mean": mean,
-                f"{self.precond_stat_prefix}/precond_proxy_std": var ** 0.5,
-                f"{self.precond_stat_prefix}/precond_proxy_max": max(vals),
-                f"{self.precond_stat_prefix}/precond_proxy_n": float(len(vals)),
-            }
-            self._dense_series_buffer.append(
-                {
-                    "optim_step": float(self.optim_step),
-                    "mean": mean,
-                    "std": var ** 0.5,
-                    "max": max(vals),
-                    "n": float(len(vals)),
-                }
+        block_mode = os.getenv("HVP_BLOCK_MODE", "back_only")
+        if block_mode == "back_only" and "back" in chosen:
+            chosen = {"back": chosen["back"]}
+
+        for tag, (_blk_name, blk_params_list) in chosen.items():
+            blk_params = [p for p in blk_params_list if p is not None and p.requires_grad]
+            if not blk_params:
+                continue
+
+            init_v = self._v_cache.get(tag)
+            self._hvp_target_params = set(blk_params)
+            lam, vj = ps._power_iter_precond_block(
+                evaluate_loss_fn=closure,
+                block_params=blk_params,
+                optimizer=self,
+                n_power_iter=self.precond_n_power_iter,
+                tol=self.precond_tol,
+                init_v=init_v,
+                sign_align=True,
+                jitter=0.0,
             )
+            self._hvp_target_params = None
+            self._v_cache[tag] = vj
+            per_block[tag] = float(lam)
 
-        else:
+            family = f"{self.precond_stat_prefix}/precond_proxy_update_{tag}"
+            payload = {
+                f"{self.precond_stat_prefix}/precond_proxy_update/optim_step": float(self.optim_step),
+                f"{self.precond_stat_prefix}/precond_proxy_update/mean": float(lam),
+                f"{self.precond_stat_prefix}/precond_proxy_update/std": 0.0,
+                f"{self.precond_stat_prefix}/precond_proxy_update/max": float(lam),
+                f"{self.precond_stat_prefix}/precond_proxy_update/n": float(len(blk_params)),
+                f"{family}/optim_step": float(self.optim_step),
+                f"{family}/mean": float(lam),
+                f"{family}/std": 0.0,
+                f"{family}/max": float(lam),
+                f"{family}/n": float(len(blk_params)),
+            }
+            dense_payloads.append(payload)
+
+        if not per_block:
             self._last_precond_stats = {}
+            return loss
 
+        vals = list(per_block.values())
+        stats = {
+            f"{self.precond_stat_prefix}/precond_proxy_mean": float(sum(vals) / len(vals)),
+            f"{self.precond_stat_prefix}/precond_proxy_max": float(max(vals)),
+            f"{self.precond_stat_prefix}/precond_proxy_n": float(len(vals)),
+        }
+        for tag, v in per_block.items():
+            stats[f"{self.precond_stat_prefix}/precond_sharpness/{tag}"] = float(v)
+
+        self._last_precond_stats = stats
+        self._dense_series_buffer.extend(dense_payloads)
         return loss
 
     def get_last_precond_stats(self):

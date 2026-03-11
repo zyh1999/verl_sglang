@@ -181,6 +181,10 @@ class ActorConfig(BaseConfig):
     precond_sharpness_tol: float = 1e-3
     precond_sharpness_sign_align: bool = True
     precond_sharpness_warmstart_jitter: float = 0.0
+    # HVP path controls
+    hvp_token_stride: int = 1
+    hvp_detach_last_block_input: bool = False
+    hvp_mem_debug: bool = False
     use_kl_loss: bool = False
     # Whether to enable PrefixGrouper-based shared-prefix forward
     use_prefix_grouper: bool = False

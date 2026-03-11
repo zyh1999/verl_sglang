@@ -38,6 +38,7 @@ from verl.utils.critical_sharpness import (
     should_compute_critical_sharpness,
 )
 from verl.utils.ppo_actor_objective import evaluate_ppo_actor_objective
+from verl.utils.ppo_hvp_objective import evaluate_ppo_actor_objective_for_hvp
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -397,7 +398,7 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["sum_pi_squared"] = sum_pi_squared
             return outputs
 
-    def _optimizer_step(self):
+    def _optimizer_step(self, closure=None):
         assert self.config.grad_clip is not None
         if self.scaler is not None:
             self.scaler.unscale_(self.actor_optimizer)
@@ -420,7 +421,10 @@ class DataParallelPPOActor(BasePPOActor):
                 print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
                 self.actor_optimizer.zero_grad()
             else:
-                self.actor_optimizer.step()
+                if closure is not None:
+                    self.actor_optimizer.step(closure=closure)
+                else:
+                    self.actor_optimizer.step()
         return grad_norm
 
     def _iter_trainable_params(self):
@@ -697,6 +701,11 @@ class DataParallelPPOActor(BasePPOActor):
                         self.actor_optimizer.set_dense_step(dense_step)
                     except Exception:
                         pass
+                if dense_step and hasattr(self.actor_optimizer, "set_named_params"):
+                    try:
+                        self.actor_optimizer.set_named_params(self._iter_trainable_named_params())
+                    except Exception:
+                        pass
 
                 theta_before = None
                 if compute_critical_sharpness:
@@ -704,7 +713,35 @@ class DataParallelPPOActor(BasePPOActor):
                     # Store in bf16 to halve memory (theta_before, theta_after, direction)
                     theta_before = [p.detach().clone().to(torch.bfloat16) for p in params]
 
-                grad_norm = self._optimizer_step()
+                precond_closure = None
+                if dense_step and (hasattr(self.actor_optimizer, "set_named_params") or hasattr(self.actor_optimizer, "precond_num_blocks")):
+                    def precond_closure():
+                        target_params = getattr(self.actor_optimizer, "_hvp_target_params", None)
+                        restore_flags = None
+                        if target_params:
+                            restore_flags = []
+                            for _n, p in self._iter_trainable_named_params():
+                                old_req = bool(p.requires_grad)
+                                restore_flags.append((p, old_req))
+                                p.requires_grad_(p in target_params)
+                        try:
+                            loss = evaluate_ppo_actor_objective_for_hvp(
+                                mini_batch=mini_batch,
+                                actor_module=self.actor_module,
+                                config=self.config,
+                                temperature=temperature,
+                                pad_token_id=pad_token_id,
+                                ulysses_sequence_parallel_size=self.ulysses_sequence_parallel_size,
+                            )
+                        finally:
+                            if restore_flags is not None:
+                                for p, old_req in restore_flags:
+                                    p.requires_grad_(old_req)
+
+                        if (not isinstance(loss, torch.Tensor)) or (not loss.requires_grad):
+                            raise TypeError("precond_closure needs differentiable Tensor loss")
+                        return loss
+                grad_norm = self._optimizer_step(closure=precond_closure)
                 self._total_optim_steps += 1
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
 
