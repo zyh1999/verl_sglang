@@ -2,8 +2,7 @@
 """Build deterministic full validation set for RL_math.
 
 - Copies full test sets from data_normalized
-- Normalizes AIME data_source to serl_math_* namespace so reward path is consistent
-- Keeps GPQA in boxed-answer style
+- Normalizes data_source to math_* namespace (no serl_* labels)
 """
 from pathlib import Path
 import pandas as pd
@@ -22,8 +21,14 @@ FILES = [
 ]
 
 DATA_SOURCE_MAP = {
-    'aime2024': 'serl_math_aime2024',
-    'aime2025': 'serl_math_aime2025',
+    'aime2024': 'math_aime2024',
+    'aime2025': 'math_aime2025',
+    'serl_math_500': 'math_500',
+    'serl_math_hard': 'math_hard',
+    'serl_math_in_domain': 'math_in_domain',
+    'serl_math_gpqa': 'math_gpqa',
+    'serl_math_aime2024': 'math_aime2024',
+    'serl_math_aime2025': 'math_aime2025',
 }
 
 
