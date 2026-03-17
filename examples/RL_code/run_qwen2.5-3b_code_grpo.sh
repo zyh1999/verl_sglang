@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Force conda env/pkg lookup on scratch first (reduce HOME pressure)
+export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-/scratch/h99859yz/conda/envs}"
+export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/scratch/h99859yz/conda/pkgs}"
+
 # ============================================================
 # verl GRPO Example: Qwen2.5 3B (Code)
 # - 基于 examples/grpo_trainer/run_qwen2.5-3b_math_grpo.sh 的脚本风格
@@ -48,13 +52,13 @@ test_files="${TEST_FILES:-['$code_test_path']}"
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-Coder-3B-Instruct}"
 
 # 长度配置（code 往往更长）
-max_prompt_length="${MAX_PROMPT_LENGTH:-1024}"
-max_response_length="${MAX_RESPONSE_LENGTH:-3072}"
+max_prompt_length="${MAX_PROMPT_LENGTH:-2048}"
+max_response_length="${MAX_RESPONSE_LENGTH:-2048}"
 
 # batch 配置（code 判题更重，默认稍保守；可用环境变量覆盖）
 train_prompt_bsz="${TRAIN_PROMPT_BSZ:-64}"
 train_prompt_mini_bsz="${TRAIN_PROMPT_MINI_BSZ:-16}"
-micro_batch_size_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-4}"
+micro_batch_size_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-16}"
 ppo_epochs="${PPO_EPOCHS:-3}"
 
 project_name="${PROJECT_NAME:-verl_grpo_example_code}"
@@ -145,15 +149,12 @@ echo "============================================================"
   data.train_files="${train_files}" \
   data.val_files="${test_files}" \
   data.train_batch_size="${train_prompt_bsz}" \
-  +data.dataloader_num_workers=2 \
   data.max_prompt_length="${max_prompt_length}" \
   data.max_response_length="${max_response_length}" \
   data.filter_overlong_prompts=True \
   data.truncation='error' \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
   +actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2 \
-  actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
-  actor_rollout_ref.actor.fsdp_config.dtype=bf16 \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.actor.use_dynamic_bsz="${use_dynamic_bsz}" \

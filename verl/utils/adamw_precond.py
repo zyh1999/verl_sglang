@@ -69,10 +69,32 @@ class AdamWPrecond(torch.optim.AdamW):
         self.optim_step += 1
 
         if not self.log_precond_stats or (not self._is_dense_step()) or (closure is None):
+            if self.log_precond_stats and self.optim_step <= 8:
+                print("[precond_gate] step=%s dense=%s closure=%s skip=gate" % (self.optim_step, self._is_dense_step(), closure is not None), flush=True)
             self._last_precond_stats = {}
             return loss
 
         chosen = self._pick_three_blocks()
+
+        hvp_mode = os.getenv("HVP_LOCAL_GRAPH_MODE", "").lower()
+        if hvp_mode == "lm_head_only":
+            forced_params = getattr(self, "_forced_hvp_params", None)
+            lm_params = [p for (n, p) in self._named_params_cache if (p is not None and "lm_head" in n)]
+            if forced_params:
+                chosen = {"back": ("lm_head", list(forced_params))}
+            elif lm_params:
+                chosen = {"back": ("lm_head", lm_params)}
+            elif "back" in chosen:
+                chosen = {"back": chosen["back"]}
+            elif chosen:
+                _k = list(chosen.keys())[-1]
+                chosen = {_k: chosen[_k]}
+
+        if self.optim_step <= 8:
+            try:
+                print("[precond_gate] step=%s dense=%s mode=%s chosen_keys=%s" % (self.optim_step, self._is_dense_step(), hvp_mode, list(chosen.keys())), flush=True)
+            except Exception:
+                pass
         if not chosen:
             self._last_precond_stats = {}
             return loss
@@ -81,8 +103,12 @@ class AdamWPrecond(torch.optim.AdamW):
         dense_payloads = []
 
         block_mode = os.getenv("HVP_BLOCK_MODE", "back_only")
-        if block_mode == "back_only" and "back" in chosen:
-            chosen = {"back": chosen["back"]}
+        if block_mode == "back_only":
+            if "back" in chosen:
+                chosen = {"back": chosen["back"]}
+            elif chosen:
+                _k = next(iter(chosen.keys()))
+                chosen = {_k: chosen[_k]}
 
         for tag, (_blk_name, blk_params_list) in chosen.items():
             blk_params = [p for p in blk_params_list if p is not None and p.requires_grad]

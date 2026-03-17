@@ -41,6 +41,28 @@ def default_compute_score(
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
+    # Normalize common dataset aliases from local parquet builders
+    ds = str(data_source)
+    alias_map = {
+        "math_500": "HuggingFaceH4/MATH-500",
+        "math500": "HuggingFaceH4/MATH-500",
+        "math_hard": "lighteval/MATH",
+        "math_in_domain": "lighteval/MATH",
+        "math_gpqa": "searchR1_popqa",
+        "math_aime2024": "lighteval/MATH",
+        "math_aime2025": "lighteval/MATH",
+    }
+    data_source = alias_map.get(ds, ds)
+
+    # Fallback: unknown math_* labels route to available scorers
+    if isinstance(data_source, str) and data_source.startswith("math_"):
+        if "aime" in data_source.lower():
+            data_source = "math_dapo"
+        elif "gpqa" in data_source.lower():
+            data_source = "searchR1_popqa"
+        else:
+            data_source = "lighteval/MATH"
+
     if data_source == "openai/gsm8k":
         from . import gsm8k
 
@@ -50,10 +72,7 @@ def default_compute_score(
         "DigitalLearningGmbH/MATH-lighteval",
         "HuggingFaceH4/MATH-500",
         # SeRL-derived parquet datasets (we keep these names so users can separate curves by data_source)
-        "serl_math_train_full",
-        "serl_math_500",
-        "serl_math_hard",
-    ] or str(data_source).startswith("serl_math"):
+    ]:
         from . import math_reward
 
         res = math_reward.compute_score(solution_str, ground_truth)

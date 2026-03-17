@@ -184,6 +184,10 @@ class ActorConfig(BaseConfig):
     # HVP path controls
     hvp_token_stride: int = 1
     hvp_detach_last_block_input: bool = False
+    # HVP local-graph mode: empty(default)/lm_head_only
+    hvp_local_graph_mode: str = ""
+    hvp_sampled_softmax_k: int = 0
+    hvp_experimental_local_graph: bool = False
     hvp_mem_debug: bool = False
     use_kl_loss: bool = False
     # Whether to enable PrefixGrouper-based shared-prefix forward

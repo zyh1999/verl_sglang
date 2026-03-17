@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Force conda env/pkg lookup on scratch first (reduce HOME pressure)
+export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-/scratch/h99859yz/conda/envs}"
+export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/scratch/h99859yz/conda/pkgs}"
+
 # ============================================================
 # verl GRPO Example: Qwen2.5-3B-Instruct (Math) - NO-IS + NO CLIP ABLATION
 # - 基于 examples/RL_math/run_qwen2.5-3b_math_grpo_no_IS.sh
@@ -20,7 +24,8 @@ PYTHON_BIN="${PYTHON_BIN:-$(command -v python)}"
 # 统一把运行时产生的缓存/临时文件写到「当前目录」(默认你在仓库根目录 verl_v0.4.x 下运行 bash)。
 # 可通过环境变量覆盖（例如 CACHE_BASE=/mnt/home）。
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
-CACHE_BASE="${CACHE_BASE:-.}"
+SCRATCH_BASE="${SCRATCH_BASE:-/scratch/h99859yz}"
+CACHE_BASE="${CACHE_BASE:-${SCRATCH_BASE}/verl_new/cache}"
 mkdir -p "${CACHE_BASE}"
 # 统一把 cache base 规范成绝对路径（一些工具要求 cache 目录必须是绝对路径）
 CACHE_BASE="$(cd "${CACHE_BASE}" && pwd)"
@@ -43,11 +48,14 @@ math_train_path="${MATH_TRAIN_PATH:-$data_root/math_task/train.parquet}"
 math_test_path="${MATH_TEST_PATH:-$data_root/math_task/test.parquet}"
 math500_test_path="${MATH500_TEST_PATH:-$data_root/math_task/test.parquet}"
 math_hard_test_path="${MATH_HARD_TEST_PATH:-$data_root/math_task_hard/test.parquet}"
+aime2024_test_path="${AIME2024_TEST_PATH:-$data_root/math_task_aime2024/test.parquet}"
+aime2025_test_path="${AIME2025_TEST_PATH:-$data_root/math_task_aime2025/test.parquet}"
+gpqa_test_path="${GPQA_TEST_PATH:-$data_root/math_task_gpqa/test.parquet}"
 
 # 训练集：默认跑 GSM8K + Math
 train_files="${TRAIN_FILES:-['$math_train_path']}"
 # 测试集：同时跑 Math500 + math_hard，并在日志里按 data_source 分开汇报
-test_files="${TEST_FILES:-['$math500_test_path','$math_hard_test_path']}"
+test_files="${TEST_FILES:-['$math500_test_path','$math_hard_test_path','$aime2024_test_path','$aime2025_test_path','$gpqa_test_path']}"
 
 # 模型（默认：Qwen2.5 3B）
 # 支持把模型作为第一个位置参数传入：
@@ -69,7 +77,7 @@ train_prompt_mini_bsz="${TRAIN_PROMPT_MINI_BSZ:-16}"
 micro_batch_size_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-16}"
 ppo_epochs="${PPO_EPOCHS:-3}"
 
-project_name="${PROJECT_NAME:-verl_grpo_example_math}"
+project_name="${PROJECT_NAME:-verl_new}"
 exp_name="${EXP_NAME:-qwen2.5_3b_no_IS_train_gsm8k+math_val_math500+math_hard_grpo_epochs_${ppo_epochs}_no_clip}"
 
 # Algorithm
@@ -116,7 +124,7 @@ offload="${OFFLOAD:-False}"
 ENGINE="${ENGINE:-sglang}"
 
 # 日志/输出
-out_dir="${OUT_DIR:-./outputs/${project_name}/${exp_name}}"
+out_dir="${OUT_DIR:-${SCRATCH_BASE}/verl_new/ckpt/${project_name}/${exp_name}}"
 mkdir -p "${out_dir}"
 
 echo "============================================================"
@@ -193,6 +201,8 @@ echo "============================================================"
   trainer.save_freq="${SAVE_FREQ:-100}" \
   trainer.test_freq="${TEST_FREQ:-20}" \
   trainer.total_epochs="${TOTAL_EPOCHS:-4}" \
+  trainer.resume_mode="disable" \
+  trainer.resume_from_path=null \
   trainer.default_local_dir="${out_dir}" \
   "$@" 2>&1 | tee "${out_dir}/${project_name}_${exp_name}_grpo.log"
 

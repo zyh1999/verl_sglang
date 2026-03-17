@@ -695,7 +695,8 @@ class DataParallelPPOActor(BasePPOActor):
                 # Dense-step gate for optimizer-side precond proxy logging (adamw_precond path).
                 # Gate by rollout/global step so selected global steps log dense local updates.
                 precond_interval = max(int(self.config.get("precond_sharpness_interval", 20)), 1)
-                dense_step = (rollout_step == 1) or (rollout_step % precond_interval == 0)
+                hvp_exp = bool(self.config.get("hvp_experimental_local_graph", False))
+                dense_step = ((rollout_step % precond_interval) == 0) if hvp_exp else ((rollout_step == 1) or (rollout_step % precond_interval == 0))
                 if hasattr(self.actor_optimizer, "set_dense_step"):
                     try:
                         self.actor_optimizer.set_dense_step(dense_step)
@@ -703,6 +704,7 @@ class DataParallelPPOActor(BasePPOActor):
                         pass
                 if dense_step and hasattr(self.actor_optimizer, "set_named_params"):
                     try:
+                        # use full named params cache; lm_head-only restriction happens in closure target_params
                         self.actor_optimizer.set_named_params(self._iter_trainable_named_params())
                     except Exception:
                         pass
@@ -714,16 +716,47 @@ class DataParallelPPOActor(BasePPOActor):
                     theta_before = [p.detach().clone().to(torch.bfloat16) for p in params]
 
                 precond_closure = None
+                # pass forced lm_head params to optimizer for lm_head_only block selection
+                try:
+                    hvp_mode = str(self.config.get("hvp_local_graph_mode", "")).lower()
+                    hvp_exp = bool(self.config.get("hvp_experimental_local_graph", False))
+                    if dense_step and hvp_exp and hvp_mode == "lm_head_only":
+                        base = self.actor_module
+                        for _ in range(6):
+                            m = getattr(base, "module", None)
+                            if m is None or m is base:
+                                break
+                            base = m
+                        lm_head_mod = getattr(base, "lm_head", None)
+                        setattr(self.actor_optimizer, "_forced_hvp_params", set(lm_head_mod.parameters()) if lm_head_mod is not None else None)
+                    else:
+                        setattr(self.actor_optimizer, "_forced_hvp_params", None)
+                except Exception:
+                    setattr(self.actor_optimizer, "_forced_hvp_params", None)
                 if dense_step and (hasattr(self.actor_optimizer, "set_named_params") or hasattr(self.actor_optimizer, "precond_num_blocks")):
                     def precond_closure():
                         target_params = getattr(self.actor_optimizer, "_hvp_target_params", None)
+                        hvp_mode = str(self.config.get("hvp_local_graph_mode", "")).lower()
+                        if hvp_exp and hvp_mode == "lm_head_only":
+                            base = self.actor_module
+                            for _ in range(6):
+                                m = getattr(base, "module", None)
+                                if m is None or m is base:
+                                    break
+                                base = m
+                            lm_head = getattr(base, "lm_head", None)
+                            if lm_head is not None:
+                                target_params = set(lm_head.parameters())
                         restore_flags = None
                         if target_params:
                             restore_flags = []
                             for _n, p in self._iter_trainable_named_params():
                                 old_req = bool(p.requires_grad)
                                 restore_flags.append((p, old_req))
-                                p.requires_grad_(p in target_params)
+                                if hvp_exp and hvp_mode == "lm_head_only":
+                                    p.requires_grad_("lm_head" in _n)
+                                else:
+                                    p.requires_grad_(p in target_params)
                         try:
                             loss = evaluate_ppo_actor_objective_for_hvp(
                                 mini_batch=mini_batch,
@@ -783,7 +816,9 @@ class DataParallelPPOActor(BasePPOActor):
                     try:
                         opt_stats = self.actor_optimizer.get_last_precond_stats()
                         if opt_stats:
-                            append_to_dict(metrics, opt_stats)
+                            opt_stats = {k: v for k, v in opt_stats.items() if v is not None}
+                            if opt_stats:
+                                append_to_dict(metrics, opt_stats)
 
                         logged_cnt = 0
                         if hasattr(self.actor_optimizer, "pop_dense_series"):
@@ -798,10 +833,19 @@ class DataParallelPPOActor(BasePPOActor):
 
                         if opt_stats and dense_step and hasattr(self.actor_optimizer, "optim_step"):
                             metrics["actor/precond_proxy_mark/optim_step"] = float(self.actor_optimizer.optim_step)
-                            metrics["actor/precond_proxy_mark/mean"] = opt_stats.get("actor/precond_proxy_mean")
-                            metrics["actor/precond_proxy_mark/std"] = opt_stats.get("actor/precond_proxy_std")
-                            metrics["actor/precond_proxy_mark/max"] = opt_stats.get("actor/precond_proxy_max")
-                            metrics["actor/precond_proxy_mark/n"] = opt_stats.get("actor/precond_proxy_n")
+                            _m = opt_stats.get("actor/precond_proxy_mean")
+                            _s = opt_stats.get("actor/precond_proxy_std")
+                            _x = opt_stats.get("actor/precond_proxy_max")
+                            _n = opt_stats.get("actor/precond_proxy_n")
+                            if _m is not None:
+                                metrics["actor/precond_proxy_mark/mean"] = _m
+                            if _s is not None:
+                                metrics["actor/precond_proxy_mark/std"] = _s
+                            if _x is not None:
+                                metrics["actor/precond_proxy_mark/max"] = _x
+                            if _n is not None:
+                                metrics["actor/precond_proxy_mark/n"] = _n
+                                metrics[actor/precond_proxy_mark/n] = _n
                     except Exception as _e:
                         if torch.distributed.get_rank() == 0:
                             print(f"[adamw_precond][warn] failed to read optimizer precond stats: {_e}", flush=True)

@@ -180,7 +180,15 @@ def _hvp_block(
     used = [gi for gi in g if gi is not None]
     if len(used) == 0:
         shapes = [tuple(p.shape) for p in block_params[:4]]
-        print(f"[precond_sharpness][debug] all_none_first_grad: n_params={len(block_params)} sample_shapes={shapes}", flush=True)
+        names = []
+        try:
+            named = list(getattr(optimizer, "_named_params_cache", []))
+            idset = {id(p) for p in block_params}
+            names = [n for (n, p) in named if id(p) in idset][:8]
+        except Exception:
+            names = []
+        req = [bool(getattr(p, "requires_grad", False)) for p in block_params[:8]]
+        print("[precond_sharpness][debug] all_none_first_grad: n_params=%s sample_shapes=%s sample_requires_grad=%s sample_names=%s" % (len(block_params), shapes, req, names), flush=True)
         raise RuntimeError("all first-order grads are None in HVP path")
     dot = sum(
         ((gi if gi is not None else torch.zeros_like(p)).flatten().dot(v.flatten()))

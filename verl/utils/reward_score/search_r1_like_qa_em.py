@@ -34,7 +34,7 @@ def normalize_answer(s):
     def lower(text):
         return text.lower()
 
-    return white_space_fix(remove_articles(remove_punc(lower(s))))
+    return white_space_fix(remove_articles(remove_punc(lower(s).replace("\boxed", "").replace("boxed", ""))))
 
 
 def em_check(prediction, golden_answers):
@@ -86,6 +86,16 @@ def extract_solution(solution_str):
     return matches[-1].group(1).strip()
 
 
+
+
+def extract_boxed(solution_str):
+    """Fallback extractor for LaTeX boxed answers: \boxed{...}."""
+    matches = re.findall(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", solution_str)
+    if not matches:
+        return None
+    return matches[-1].strip()
+
+
 def count_answer_tags(text):
     opening_tags = text.count("<answer>")
     closing_tags = text.count("</answer>")
@@ -104,12 +114,14 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         score: the score for the correct answer
     """
     answer = extract_solution(solution_str=solution_str)
+    if answer is None:
+        answer = extract_boxed(solution_str)
     open_count, close_count = count_answer_tags(solution_str)
     do_print = random.randint(1, 64) == 1
 
     if do_print:
         print("--------------------------------")
-        print(f"Golden answers: {ground_truth['target']}")
+        print(f"Golden answers: {normalize_ground_truth_targets(ground_truth)}")
         if answer is not None:
             print(f"Extracted answer is not None: {answer}")
         else:
@@ -119,7 +131,7 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
     if answer is None:
         return 0
     else:
-        if em_check(answer, ground_truth["target"]):
+        if em_check(answer, normalize_ground_truth_targets(ground_truth)):
             if open_count > 10 or close_count > 10:  # prevent output a lot of </answer>
                 score = score / 4
                 return score
@@ -139,18 +151,34 @@ def compute_score_subem(solution_str, ground_truth, method="strict", format_scor
         score: the score for the correct answer
     """
     answer = extract_solution(solution_str=solution_str)
+    if answer is None:
+        answer = extract_boxed(solution_str)
     do_print = random.randint(1, 64) == 1
 
     if do_print:
         print("--------------------------------")
-        print(f"Golden answers: {ground_truth['target']}")
+        print(f"Golden answers: {normalize_ground_truth_targets(ground_truth)}")
         print(f"Extracted answer: {answer}")
         print(f"Solution string: {solution_str}")
 
     if answer is None:
         return 0
     else:
-        if subem_check(answer, ground_truth["target"]):
+        if subem_check(answer, normalize_ground_truth_targets(ground_truth)):
             return score
         else:
             return format_score
+
+def normalize_ground_truth_targets(ground_truth):
+    if isinstance(ground_truth, dict):
+        if "target" in ground_truth:
+            tgt = ground_truth["target"]
+        elif "answer" in ground_truth:
+            tgt = ground_truth["answer"]
+        else:
+            tgt = ground_truth
+    else:
+        tgt = ground_truth
+    if isinstance(tgt, (list, tuple)):
+        return [str(x) for x in tgt]
+    return [str(tgt)]

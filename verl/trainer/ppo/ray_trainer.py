@@ -1782,7 +1782,7 @@ class RayPPOTrainer:
                             continue
                         if "adam_nsr/optim_step" not in nsr_entry or not nsr_entry:
                             continue
-                        logger.log(data=nsr_entry)
+                        logger.log(data=nsr_entry, step=self.global_steps)
 
                 # Log per-optimizer-step critical sharpness with custom x-axis (optim_step)
                 # Keep actor/critical_sharpness_optim_step in data so wandb.define_metric(step_metric=...) can draw line charts

@@ -1,12 +1,11 @@
 """
 SignSGD optimizers.
 
-Two variants:
-1) SignSGD:         update uses sign(grad)
-2) SignSGD_Momentum update uses sign(momentum_buffer), momentum buffer follows SGD momentum
-
-We keep the signature compatible with verl's dynamic optimizer builder:
-- accepts lr, weight_decay
+Notes:
+- Keep one canonical momentum+weight-decay implementation:
+  SignSGD_Momentum_WD (decoupled WD).
+- SignSGD_Momentum is retained as a thin compatibility wrapper to avoid
+  breaking existing scripts, but it reuses the same decoupled implementation.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from __future__ import annotations
 import torch
 from torch.optim.optimizer import Optimizer
 
-__all__ = ["SignSGD", "SignSGD_Momentum", "SignSGD_Momentum_WD", "SignSGD_Momentum_Safe", "Signum", "SignMomentumSGD"]
+__all__ = ["SignSGD", "SignSGD_Momentum_", "SignSGD_Momentum_WD", "SignSGD_Momentum_Safe", "Signum"]
 
 
 class SignSGD(Optimizer):
@@ -58,76 +57,14 @@ class SignSGD(Optimizer):
         return loss
 
 
-class SignSGD_Momentum(Optimizer):
-    """SignSGD with momentum (SGD-style) and optional decoupled weight decay.
-
-    Momentum buffer:
-      buf <- momentum * buf + grad
-    Update:
-      p <- (1 - lr * wd) * p
-      p <- p - lr * sign(buf)
-    """
-
-    def __init__(
-        self,
-        params,
-        lr: float = 1e-3,
-        momentum: float = 0.9,
-        weight_decay: float = 0.0,
-    ):
-        if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}")
-        if not (0.0 <= momentum < 1.0):
-            raise ValueError(f"Invalid momentum: {momentum}")
-        if weight_decay < 0.0:
-            raise ValueError(f"Invalid weight_decay: {weight_decay}")
-        defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay)
-        super().__init__(params, defaults)
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for group in self.param_groups:
-            lr = group["lr"]
-            mu = group["momentum"]
-            wd = group["weight_decay"]
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                g = p.grad
-                if g.is_sparse:
-                    raise RuntimeError("SignSGD_Momentum does not support sparse gradients")
-
-                state = self.state[p]
-                if len(state) == 0:
-                    state["momentum_buffer"] = torch.zeros_like(p, memory_format=torch.preserve_format)
-
-                buf = state["momentum_buffer"]
-                buf.mul_(mu).add_(g)
-
-                if wd != 0.0:
-                    p.data.mul_(1.0 - lr * wd)
-
-                p.data.add_(buf.sign(), alpha=-lr)
-
-        return loss
-
-
 class SignSGD_Momentum_WD(Optimizer):
-    """SignSGD with momentum and *decoupled* weight decay.
+    """SignSGD with momentum and decoupled weight decay (canonical WD variant).
 
     Momentum buffer:
       buf <- momentum * buf + grad
     Update:
       p <- (1 - lr * wd) * p
       p <- p - lr * sign(buf)
-
-    Equivalent combined form:
-      p <- p - lr * (sign(buf) + wd * p)
     """
 
     def __init__(
@@ -181,24 +118,19 @@ class SignSGD_Momentum_WD(Optimizer):
 
 
 
+class SignSGD_Momentum_(SignSGD_Momentum_WD):
+    """SignSGD momentum variant without weight decay.
+
+    Convenience wrapper: identical to SignSGD_Momentum_WD but forces
+    weight_decay=0.0 regardless of caller input.
+    """
+
+    def __init__(self, params, lr: float = 1e-3, momentum: float = 0.9, weight_decay: float = 0.0):
+        super().__init__(params=params, lr=lr, momentum=momentum, weight_decay=0.0)
 
 
 class SignSGD_Momentum_Safe(Optimizer):
-    """SignSGD with SGD momentum + safe-region downscale for tiny momentum buffers.
-
-    Momentum buffer:
-      buf <- momentum * buf + grad
-
-    Update:
-      p <- (1 - lr * wd) * p
-      if |buf| > momentum_safe_eps:
-          p <- p - lr * sign(buf)
-      else:
-          p <- p - lr * unsafe_update_scale * sign(buf)
-
-    This keeps Sign-style updates but suppresses aggressive flips when momentum
-    magnitude is extremely small (near-zero, numerically fragile region).
-    """
+    """SignSGD with SGD momentum + safe-region downscale for tiny momentum buffers."""
 
     def __init__(
         self,
@@ -260,8 +192,6 @@ class SignSGD_Momentum_Safe(Optimizer):
                 if wd != 0.0:
                     p.data.mul_(1.0 - lr * wd)
 
-                # Safe region (like Adam-NSR safe-mask style): when |buf| is tiny,
-                # reduce actual step magnitude to avoid unstable sign flips.
                 update = buf.sign()
                 if unsafe_scale != 1.0:
                     safe = buf.abs() > eps_m
@@ -271,20 +201,13 @@ class SignSGD_Momentum_Safe(Optimizer):
 
         return loss
 
-# Backward-compat alias
-SignMomentumSGD = SignSGD_Momentum_Safe
 
 class Signum(Optimizer):
     """Signum optimizer with momentum and optional decoupled weight decay.
 
-    Reference-style update:
-      buf <- momentum * buf + (1 - momentum) * grad
-      p   <- (1 - lr * wd) * p
-      p   <- p - lr * sign(buf)
-
-    Notes:
-      - momentum=0 reduces to SignSGD.
-      - sparse gradients are not supported.
+    Safe-region boost:
+    - If |momentum_buffer| <= momentum_safe_eps, temporarily scale lr by
+      safe_region_lr_scale (default 10x) for that element update.
     """
 
     def __init__(
@@ -293,6 +216,8 @@ class Signum(Optimizer):
         lr: float = 1e-6,
         momentum: float = 0.9,
         weight_decay: float = 0.0,
+        momentum_safe_eps: float = 1e-5,
+        safe_region_lr_scale: float = 10.0,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -300,8 +225,18 @@ class Signum(Optimizer):
             raise ValueError(f"Invalid momentum: {momentum}")
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay: {weight_decay}")
+        if momentum_safe_eps < 0.0:
+            raise ValueError(f"Invalid momentum_safe_eps: {momentum_safe_eps}")
+        if safe_region_lr_scale < 0.0:
+            raise ValueError(f"Invalid safe_region_lr_scale: {safe_region_lr_scale}")
 
-        defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay)
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            weight_decay=weight_decay,
+            momentum_safe_eps=momentum_safe_eps,
+            safe_region_lr_scale=safe_region_lr_scale,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -315,6 +250,8 @@ class Signum(Optimizer):
             lr = group["lr"]
             mu = group["momentum"]
             wd = group["weight_decay"]
+            eps_m = group.get("momentum_safe_eps", 1e-5)
+            lr_scale = group.get("safe_region_lr_scale", 10.0)
 
             for p in group["params"]:
                 if p.grad is None:
@@ -327,7 +264,10 @@ class Signum(Optimizer):
                     p.data.mul_(1.0 - lr * wd)
 
                 if mu == 0.0:
-                    p.data.add_(g.sign(), alpha=-lr)
+                    sign_dir = g.sign()
+                    safe_mask = g.abs() <= eps_m
+                    eff_scale = torch.where(safe_mask, torch.full_like(sign_dir, lr_scale), torch.ones_like(sign_dir))
+                    p.data.add_(sign_dir * eff_scale, alpha=-lr)
                     continue
 
                 state = self.state[p]
@@ -336,6 +276,11 @@ class Signum(Optimizer):
 
                 buf = state["momentum_buffer"]
                 buf.mul_(mu).add_(g, alpha=(1.0 - mu))
-                p.data.add_(buf.sign(), alpha=-lr)
+
+                sign_dir = buf.sign()
+                safe_mask = buf.abs() <= eps_m
+                eff_scale = torch.where(safe_mask, torch.full_like(sign_dir, lr_scale), torch.ones_like(sign_dir))
+                p.data.add_(sign_dir * eff_scale, alpha=-lr)
 
         return loss
+
