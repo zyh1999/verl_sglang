@@ -36,6 +36,16 @@ from verl.utils.import_utils import load_extern_object
 logger = logging.getLogger(__name__)
 
 
+def _normalize_subject_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if item is not None and str(item).strip()]
+        return " | ".join(parts) if parts else None
+    text = str(value).strip()
+    return text or None
+
+
 def collate_fn(data_list: list[dict]) -> dict:
     """
     Collate a batch of sample dicts into batched tensors and arrays.
@@ -160,6 +170,8 @@ class RLHFDataset(Dataset):
                 dataframe = datasets.load_dataset("json", data_files=parquet_file)["train"]
             else:
                 raise ValueError(f"Unsupported file format: {parquet_file}")
+            if "extra_info" in dataframe.column_names:
+                dataframe = dataframe.map(self._normalize_extra_info)
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
@@ -177,6 +189,15 @@ class RLHFDataset(Dataset):
             print(f"selected {self.max_samples} random samples out of {total}")
 
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
+
+    @staticmethod
+    def _normalize_extra_info(row: dict) -> dict:
+        extra_info = row.get("extra_info")
+        if isinstance(extra_info, dict) and "subject" in extra_info:
+            normalized = dict(extra_info)
+            normalized["subject"] = _normalize_subject_value(extra_info.get("subject"))
+            row["extra_info"] = normalized
+        return row
 
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts

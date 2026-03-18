@@ -6,7 +6,7 @@ No randomness: keep first N rows after preserving input order.
 from pathlib import Path
 import pandas as pd
 
-ROOT = Path('/mnt/iusers01/fatpou01/compsci01/h99859yz/verl_new')
+ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'data' / 'math_training_full'
 DST = ROOT / 'data' / 'math_training_test'
 
@@ -29,8 +29,12 @@ def subset_df(df: pd.DataFrame, n: int | None) -> pd.DataFrame:
 def main() -> None:
     DST.mkdir(parents=True, exist_ok=True)
     total = 0
+    missing = []
     for rel, n in PLAN.items():
         src = SRC / rel
+        if not src.exists():
+            missing.append(rel)
+            continue
         dst = DST / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -41,6 +45,11 @@ def main() -> None:
         ds = out['data_source'].value_counts().to_dict() if 'data_source' in out.columns else {}
         print(f"{rel}: {len(df)} -> {len(out)} (target={n}) data_source={ds}")
         total += len(out)
+
+    if missing:
+        print("WARNING missing input files:")
+        for rel in missing:
+            print(f"  - {rel}")
 
     print(f"DONE subset rows={total}")
     print(f"Output root: {DST}")

@@ -1,0 +1,19 @@
+#!/bin/bash --login
+#SBATCH -p gpuH
+#SBATCH --account gpu-h200-fse-pgdr     
+#SBATCH -G 2
+#SBATCH -t 4-0
+#SBATCH -n 1
+#SBATCH -c 8
+#SBATCH --mem=120G
+
+module purge
+module load libs/cuda/12.6.2  
+module load miniforge
+
+conda activate verl
+cd ~/scratch/verl_sglang
+
+export CUDA_VISIBLE_DEVICES=0,1
+
+sh examples/RL_math/run_qwen2.5-3b_math_grpo.sh

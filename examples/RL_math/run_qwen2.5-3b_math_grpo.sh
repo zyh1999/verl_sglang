@@ -1,19 +1,6 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-# Force conda env/pkg lookup on scratch first (reduce HOME pressure)
-export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-/scratch/h99859yz/conda/envs}"
-export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/scratch/h99859yz/conda/pkgs}"
-
-# ============================================================
-# verl GRPO Example: Qwen2.5-3B-Instruct (Math)
-# - 风格尽量仿照 ASPO/Archer2.0 的训练脚本（变量集中在顶部 + 可用环境变量覆盖）
-# - 入口保持 verl：python -m verl.trainer.main_ppo
-# ============================================================
-
-unset VLLM_ATTENTION_BACKEND
-unset ROCR_VISIBLE_DEVICES
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -21,51 +8,85 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # 如需指定，运行前设置：PYTHON_BIN=/path/to/python
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python)}"
 
-# 统一把运行时产生的缓存/临时文件写到「当前目录」(默认你在仓库根目录 verl_v0.4.x 下运行 bash)。
-# 可通过环境变量覆盖（例如 CACHE_BASE=/mnt/home）。
-export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
-SCRATCH_BASE="${SCRATCH_BASE:-/scratch/h99859yz}"
-CACHE_BASE="${CACHE_BASE:-${SCRATCH_BASE}/verl_new/cache}"
-mkdir -p "${CACHE_BASE}"
-# 统一把 cache base 规范成绝对路径（一些工具要求 cache 目录必须是绝对路径）
-CACHE_BASE="$(cd "${CACHE_BASE}" && pwd)"
-export CACHE_BASE
-export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${CACHE_BASE}/.cache}"
-export HF_HOME="${HF_HOME:-${CACHE_BASE}/.hf}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
-export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
-export RAY_TMPDIR="${RAY_TMPDIR:-${CACHE_BASE}/ray}"
-mkdir -p "${XDG_CACHE_HOME}" "${HF_DATASETS_CACHE}" "${HUGGINGFACE_HUB_CACHE}" "${RAY_TMPDIR}"
+# SGLang/flashinfer JIT 需要较新的 nvcc 才能处理 Hopper (compute_90a)
+CUDA_HOME="${CUDA_HOME:-/opt/apps/libs/nvidia-cuda/toolkit/12.4.1}"
+export CUDA_HOME
+export PATH="${CUDA_HOME}/bin:${PATH}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+
+# ============================================================
+# verl GRPO Example: Qwen2.5-3B-Instruct (Math)
+# - 除模型本身配置外，尽量保持第二份脚本写法
+# - 入口保持 verl：python -m verl.trainer.main_ppo
+# ============================================================
+
+unset VLLM_ATTENTION_BACKEND
+unset ROCR_VISIBLE_DEVICES
 
 nnodes="${NNODES:-1}"
 
-
-
 # 数据（默认用仓库内的 ./data，不放在 $HOME 下）
 data_root="${DATA_ROOT:-${ROOT_DIR}/data}"
-gsm8k_train_path="${GSM8K_TRAIN_PATH:-$data_root/gsm8k/train.parquet}"
-gsm8k_test_path="${GSM8K_TEST_PATH:-$data_root/gsm8k/test.parquet}"
+# gsm8k_train_path="${GSM8K_TRAIN_PATH:-$data_root/gsm8k/train.parquet}"
+# gsm8k_test_path="${GSM8K_TEST_PATH:-$data_root/gsm8k/test.parquet}"
 # 训练用的 “math7500”：使用 SeRL 提供的 7.5k GT（data/math_task/train.parquet）
 math_train_path="${MATH_TRAIN_PATH:-$data_root/math_task/train.parquet}"
 math_test_path="${MATH_TEST_PATH:-$data_root/math_task/test.parquet}"
-math500_test_path="${MATH500_TEST_PATH:-${ROOT_DIR}/data_normalized/math_task/test.parquet}"
-math_hard_test_path="${MATH_HARD_TEST_PATH:-${ROOT_DIR}/data_normalized/math_task_hard/test.parquet}"
-aime2024_test_path="${AIME2024_TEST_PATH:-${ROOT_DIR}/data_normalized/math_task_aime2024/test.parquet}"
-aime2025_test_path="${AIME2025_TEST_PATH:-${ROOT_DIR}/data_normalized/math_task_aime2025/test.parquet}"
-gpqa_test_path="${GPQA_TEST_PATH:-${ROOT_DIR}/data_normalized/math_task_gpqa/test.parquet}"
+# math500_test_path="${MATH500_TEST_PATH:-$data_root/math_task/test.parquet}"
+# math_hard_test_path="${MATH_HARD_TEST_PATH:-$data_root/math_task_hard/test.parquet}"
+aime2024_test_path="${AIME2024_TEST_PATH:-$data_root/math_task_aime2024/test.parquet}"
+aime2025_test_path="${AIME2025_TEST_PATH:-$data_root/math_task_aime2025/test.parquet}"
+# gpqa_test_path="${GPQA_TEST_PATH:-$data_root/math_task_gpqa/test.parquet}"
+
+build_hydra_list() {
+  local out="["
+  local sep=""
+  local item
+  for item in "$@"; do
+    out="${out}${sep}'${item}'"
+    sep=","
+  done
+  out="${out}]"
+  printf '%s' "$out"
+}
 
 # 训练集：默认只跑 math_task/train.parquet（约 7.5k）
 # 可用环境变量 TRAIN_FILES 覆盖
 train_files="${TRAIN_FILES:-['$math_train_path']}"
-# 测试集：同时跑 Math500 + math_hard，并在日志里按 data_source 分开汇报
-test_files="${TEST_FILES:-['$math500_test_path','$math_hard_test_path','$aime2024_test_path','$aime2025_test_path','$gpqa_test_path']}"
 
-# 模型（默认：Qwen2.5 3B）
-# 支持把模型作为第一个位置参数传入：
-#   bash run_qwen2.5-3b_math_grpo.sh <MODEL_PATH_OR_NAME> [hydra_overrides...]
-# 例如：
-#   bash run_qwen2.5-3b_math_grpo.sh Qwen/Qwen2.5-3B-Instruct
-#   bash run_qwen2.5-3b_math_grpo.sh deepseek-v2
+if [[ ! -f "${math_train_path}" && -z "${TRAIN_FILES:-}" ]]; then
+  echo "Missing train file: ${math_train_path}" >&2
+  exit 1
+fi
+
+# 测试集：默认只传入实际存在的文件；可用环境变量 TEST_FILES 覆盖
+if [[ -n "${TEST_FILES:-}" ]]; then
+  test_files="${TEST_FILES}"
+else
+  val_candidates=(
+    "${math_test_path}"
+    # "${math500_test_path}"
+    # "${math_hard_test_path}"
+    # "${aime2024_test_path}"
+    # "${aime2025_test_path}"
+    # "${gpqa_test_path}"
+  )
+  existing_val_files=()
+  for path in "${val_candidates[@]}"; do
+    if [[ -f "${path}" ]]; then
+      existing_val_files+=("${path}")
+    else
+      echo "Skipping missing val file: ${path}" >&2
+    fi
+  done
+  if [[ ${#existing_val_files[@]} -eq 0 ]]; then
+    echo "No validation files found under ${data_root}" >&2
+    exit 1
+  fi
+  test_files="$(build_hydra_list "${existing_val_files[@]}")"
+fi
+
+# 模型（与第一份统一）
 if [[ $# -gt 0 && "${1}" != -* ]]; then
   MODEL_PATH="${1}"
   shift
@@ -77,16 +98,15 @@ fi
 max_prompt_length="${MAX_PROMPT_LENGTH:-2048}"
 max_response_length="${MAX_RESPONSE_LENGTH:-2048}"
 
-# batch 配置（对齐 ASPO Llama 脚本的口径：train=64, mini=16, micro=16）
+# batch 配置
 train_prompt_bsz="${TRAIN_PROMPT_BSZ:-64}"
 train_prompt_mini_bsz="${TRAIN_PROMPT_MINI_BSZ:-16}"
 micro_batch_size_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-16}"
-ppo_epochs="${PPO_EPOCHS:-1}"
+ppo_epochs="${PPO_EPOCHS:-3}"
 
 project_name="${PROJECT_NAME:-verl_new}"
-# 默认 run 名（用于 wandb 曲线/输出目录）：体现 IS + 训练集/测试集
+# 默认 run 名
 exp_name="${EXP_NAME:-qwen2.5_3b_train_gsm8k+math_val_math500+math_hard_grpo_epochs_${ppo_epochs}}"
-
 
 # Algorithm
 adv_estimator="${ADV_ESTIMATOR:-grpo}"
@@ -95,15 +115,12 @@ temperature="${TEMPERATURE:-1.0}"
 top_p="${TOP_P:-1.0}"
 top_k="${TOP_K:--1}"
 
-# Validation（用于 pass@k / best@k 评估）
-# 说明：
-# - 要测 pass@k(k>1)，必须 do_sample=True 且 temperature>0，并设置 val_n>=最大k（例如 16）
+# Validation
 val_n="${VAL_N:-16}"
 val_do_sample="${VAL_DO_SAMPLE:-True}"
 val_temperature="${VAL_TEMPERATURE:-1.0}"
 val_top_p="${VAL_TOP_P:-1.0}"
 val_top_k="${VAL_TOP_K:--1}"
-# 默认只评估 10% 的验证集来加速（可用环境变量覆盖）
 val_subset_ratio="${VAL_SUBSET_RATIO:-1.0}"
 val_subset_seed="${VAL_SUBSET_SEED:-42}"
 val_subset_resample_each_eval="${VAL_SUBSET_RESAMPLE_EACH_EVAL:-False}"
@@ -121,20 +138,34 @@ clip_ratio_high="${CLIP_RATIO_HIGH:-0.2}"
 clip_ratio_c="${CLIP_RATIO_C:-3.0}"
 loss_agg_mode="${LOSS_AGG_MODE:-token-mean}"
 
-# 是否使用重要性采样（PPO 默认 True；设 False 会走我们刚加的 no-IS 分支）
 use_importance_sampling="${USE_IMPORTANCE_SAMPLING:-True}"
 
-# 性能相关参数（可按机器情况覆盖）
+# 性能相关参数
 sp_size="${SP_SIZE:-1}"
 gen_tp="${GEN_TP:-1}"
 use_dynamic_bsz="${USE_DYNAMIC_BSZ:-True}"
 offload="${OFFLOAD:-False}"
-# rollout inference engine: sglang | vllm | hf
-# 你环境里没装 vllm 时会报 `No module named 'vllm'`，因此默认用 sglang（可用 ROLLOUT_NAME 覆盖）
+ref_offload="${REF_OFFLOAD:-False}"
+gpu_mem_util="${GPU_MEM_UTIL:-0.35}"
+rollout_enforce_eager="${ROLLOUT_ENFORCE_EAGER:-True}"
+free_cache_engine="${FREE_CACHE_ENGINE:-False}"
+sglang_skip_server_warmup="${SGLANG_SKIP_SERVER_WARMUP:-False}"
+
 rollout_name="${ROLLOUT_NAME:-vllm}"
 
+if [[ "${rollout_name}" == "hf" ]]; then
+  echo "Unsupported rollout backend for this script: hf (async rollout only supports sglang or vllm)" >&2
+  exit 1
+fi
+
+rollout_extra_args=()
+if [[ "${rollout_name}" == "sglang" ]]; then
+  rollout_extra_args+=("+actor_rollout_ref.rollout.engine_kwargs.sglang.skip_server_warmup=${sglang_skip_server_warmup}")
+fi
+
 # 日志/输出
-out_dir="${OUT_DIR:-${SCRATCH_BASE}/verl_new/ckpt/${project_name}/${exp_name}}"
+out_dir="${OUT_DIR:-${ROOT_DIR}/outputs/${project_name}/${exp_name}}"
+
 mkdir -p "${out_dir}"
 
 echo "============================================================"
@@ -147,6 +178,7 @@ echo "max_prompt_length=${max_prompt_length}, max_response_length=${max_response
 echo "train_bsz=${train_prompt_bsz}, mini_bsz=${train_prompt_mini_bsz}, micro_bsz/gpu=${micro_batch_size_per_gpu}"
 echo "ppo_epochs=${ppo_epochs}"
 echo "n=${n_resp_per_prompt}, temp=${temperature}, top_p=${top_p}, top_k=${top_k}"
+# echo "rollout=${rollout_name}, gpu_mem_util=${gpu_mem_util}, enforce_eager=${rollout_enforce_eager}, free_cache_engine=${free_cache_engine}, offload=${offload}, ref_offload=${ref_offload}"
 echo "val_n=${val_n}, val_do_sample=${val_do_sample}, val_temp=${val_temperature}, val_top_p=${val_top_p}, val_top_k=${val_top_k}"
 echo "val_subset_ratio=${val_subset_ratio}"
 echo "val_subset_seed=${val_subset_seed}, val_subset_resample_each_eval=${val_subset_resample_each_eval}"
@@ -164,6 +196,7 @@ echo "============================================================"
   data.truncation='error' \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
   +actor_rollout_ref.model.override_config.attn_implementation=flash_attention_2 \
+  actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.actor.use_dynamic_bsz="${use_dynamic_bsz}" \
@@ -183,9 +216,13 @@ echo "============================================================"
   actor_rollout_ref.actor.entropy_coeff=0 \
   actor_rollout_ref.actor.fsdp_config.param_offload="${offload}" \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload="${offload}" \
+  actor_rollout_ref.ref.fsdp_config.param_offload="${ref_offload}" \
   actor_rollout_ref.actor.ulysses_sequence_parallel_size="${sp_size}" \
   actor_rollout_ref.rollout.tensor_model_parallel_size="${gen_tp}" \
   actor_rollout_ref.rollout.name="${rollout_name}" \
+  actor_rollout_ref.rollout.gpu_memory_utilization="${gpu_mem_util}" \
+  actor_rollout_ref.rollout.enforce_eager="${rollout_enforce_eager}" \
+  actor_rollout_ref.rollout.free_cache_engine="${free_cache_engine}" \
   actor_rollout_ref.rollout.n="${n_resp_per_prompt}" \
   actor_rollout_ref.rollout.temperature="${temperature}" \
   actor_rollout_ref.rollout.top_p="${top_p}" \
@@ -209,6 +246,5 @@ echo "============================================================"
   trainer.resume_mode="disable" \
   trainer.resume_from_path=null \
   trainer.default_local_dir="${out_dir}" \
+  "${rollout_extra_args[@]}" \
   "$@" 2>&1 | tee "${out_dir}/${project_name}_${exp_name}_grpo.log"
-
-

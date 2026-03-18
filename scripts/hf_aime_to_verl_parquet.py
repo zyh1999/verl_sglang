@@ -3,6 +3,16 @@ import argparse, os
 from datasets import Dataset, load_dataset
 
 
+def normalize_subject(value, fallback: str) -> str:
+    if value is None:
+        return fallback
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if item is not None and str(item).strip()]
+        return " | ".join(parts) if parts else fallback
+    text = str(value).strip()
+    return text or fallback
+
+
 def to_rows(ds, data_source: str, instruction: str):
     rows = []
     for i, ex in enumerate(ds):
@@ -20,7 +30,7 @@ def to_rows(ds, data_source: str, instruction: str):
                 'split': 'test',
                 'idx': i,
                 'unique_id': ex.get('id') or ex.get('problem_idx') or i,
-                'subject': ex.get('domain') or ex.get('problem_type') or 'gpqa',
+                'subject': normalize_subject(ex.get('domain') or ex.get('problem_type'), 'gpqa'),
                 'level': None,
                 'answer_raw': gt,
                 'solution': ex.get('solution'),
