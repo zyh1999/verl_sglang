@@ -758,8 +758,16 @@ class DataParallelPPOActor(BasePPOActor):
                                 else:
                                     p.requires_grad_(p in target_params)
                         try:
+                            hvp_num_samples = int(self.config.get("hvp_num_samples", 0) or 0)
+                            if hvp_num_samples > 0:
+                                n_total = len(mini_batch)
+                                n_pick = min(hvp_num_samples, n_total)
+                                perm = torch.randperm(n_total, device="cpu")[:n_pick]
+                                hvp_batch = mini_batch[perm.tolist()]
+                            else:
+                                hvp_batch = mini_batch
                             loss = evaluate_ppo_actor_objective_for_hvp(
-                                mini_batch=mini_batch,
+                                mini_batch=hvp_batch,
                                 actor_module=self.actor_module,
                                 config=self.config,
                                 temperature=temperature,
@@ -833,10 +841,13 @@ class DataParallelPPOActor(BasePPOActor):
 
                         if opt_stats and dense_step and hasattr(self.actor_optimizer, "optim_step"):
                             metrics["actor/precond_proxy_mark/optim_step"] = float(self.actor_optimizer.optim_step)
-                            _m = opt_stats.get("actor/precond_proxy_mean")
-                            _s = opt_stats.get("actor/precond_proxy_std")
-                            _x = opt_stats.get("actor/precond_proxy_max")
-                            _n = opt_stats.get("actor/precond_proxy_n")
+                            if isinstance(opt_stats, dict):
+                                _m = opt_stats.get("actor/precond_proxy_mean")
+                                _s = opt_stats.get("actor/precond_proxy_std")
+                                _x = opt_stats.get("actor/precond_proxy_max")
+                                _n = opt_stats.get("actor/precond_proxy_n")
+                            else:
+                                _m = _s = _x = _n = None
                             if _m is not None:
                                 metrics["actor/precond_proxy_mark/mean"] = _m
                             if _s is not None:
@@ -845,7 +856,6 @@ class DataParallelPPOActor(BasePPOActor):
                                 metrics["actor/precond_proxy_mark/max"] = _x
                             if _n is not None:
                                 metrics["actor/precond_proxy_mark/n"] = _n
-                                metrics[actor/precond_proxy_mark/n] = _n
                     except Exception as _e:
                         if torch.distributed.get_rank() == 0:
                             print(f"[adamw_precond][warn] failed to read optimizer precond stats: {_e}", flush=True)

@@ -251,7 +251,7 @@ def _power_iter_precond_block(
             lam = new_lam
             break
         lam = new_lam
-    return float(max(lam if lam is not None else 0.0, 0.0)), _detach(v)
+    return float(lam if lam is not None else 0.0), _detach(v)
 
 
 def estimate_precond_sharpness(
@@ -297,6 +297,8 @@ def estimate_precond_sharpness(
                 sign_align=sign_align,
                 jitter=jitter,
             )
+            if os.getenv("HVP_DEBUG_LAM", "0") == "1":
+                print(f"[precond_sharpness][lam_raw] block={key} lam={lam}", flush=True)
             lams.append(float(lam))
             v_out[key] = vj
 

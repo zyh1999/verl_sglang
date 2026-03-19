@@ -100,6 +100,7 @@ class AdamWPrecond(torch.optim.AdamW):
             return loss
 
         per_block = {}
+        per_block_raw = {}
         dense_payloads = []
 
         block_mode = os.getenv("HVP_BLOCK_MODE", "back_only")
@@ -117,7 +118,7 @@ class AdamWPrecond(torch.optim.AdamW):
 
             init_v = self._v_cache.get(tag)
             self._hvp_target_params = set(blk_params)
-            lam, vj = ps._power_iter_precond_block(
+            lam_raw, vj = ps._power_iter_precond_block(
                 evaluate_loss_fn=closure,
                 block_params=blk_params,
                 optimizer=self,
@@ -129,17 +130,23 @@ class AdamWPrecond(torch.optim.AdamW):
             )
             self._hvp_target_params = None
             self._v_cache[tag] = vj
-            per_block[tag] = float(lam)
+            per_block_raw[tag] = float(lam_raw)
+            lam = float(max(lam_raw, 0.0))
+            per_block[tag] = lam
+            if os.getenv("HVP_DEBUG_LAM", "0") == "1":
+                print(f"[precond_debug] step={self.optim_step} tag={tag} lam_raw={lam_raw} lam_clipped={lam}", flush=True)
 
             family = f"{self.precond_stat_prefix}/precond_proxy_update_{tag}"
             payload = {
                 f"{self.precond_stat_prefix}/precond_proxy_update/optim_step": float(self.optim_step),
                 f"{self.precond_stat_prefix}/precond_proxy_update/mean": float(lam),
+                f"{self.precond_stat_prefix}/precond_proxy_update/raw": float(lam_raw),
                 f"{self.precond_stat_prefix}/precond_proxy_update/std": 0.0,
                 f"{self.precond_stat_prefix}/precond_proxy_update/max": float(lam),
                 f"{self.precond_stat_prefix}/precond_proxy_update/n": float(len(blk_params)),
                 f"{family}/optim_step": float(self.optim_step),
                 f"{family}/mean": float(lam),
+                f"{family}/raw": float(lam_raw),
                 f"{family}/std": 0.0,
                 f"{family}/max": float(lam),
                 f"{family}/n": float(len(blk_params)),
@@ -151,10 +158,13 @@ class AdamWPrecond(torch.optim.AdamW):
             return loss
 
         vals = list(per_block.values())
+        raw_vals = list(per_block_raw.values()) if per_block_raw else vals
         stats = {
             f"{self.precond_stat_prefix}/precond_proxy_mean": float(sum(vals) / len(vals)),
             f"{self.precond_stat_prefix}/precond_proxy_max": float(max(vals)),
             f"{self.precond_stat_prefix}/precond_proxy_n": float(len(vals)),
+            f"{self.precond_stat_prefix}/precond_proxy_raw_mean": float(sum(raw_vals) / len(raw_vals)),
+            f"{self.precond_stat_prefix}/precond_proxy_raw_max": float(max(raw_vals)),
         }
         for tag, v in per_block.items():
             stats[f"{self.precond_stat_prefix}/precond_sharpness/{tag}"] = float(v)

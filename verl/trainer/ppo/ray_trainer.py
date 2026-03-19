@@ -1795,7 +1795,7 @@ class RayPPOTrainer:
                             continue
                         if "actor/critical_step/optim_step" not in sharp_entry or not sharp_entry:
                             continue
-                        logger.log(data=sharp_entry)
+                        logger.log(data=sharp_entry, step=int(sharp_entry["actor/critical_step/optim_step"]))
 
 
                 # Log per-optimizer-step precond-proxy series with custom x-axis (optim_step)
@@ -1817,7 +1817,7 @@ class RayPPOTrainer:
                             }
                         if "actor/precond_proxy_update/optim_step" not in payload or not payload:
                             continue
-                        logger.log(data=payload, step=int(payload.get("actor/precond_proxy_update/optim_step", self.global_steps)))
+                        logger.log(data=payload, step=int(payload["actor/precond_proxy_update/optim_step"]))
 
                 progress_bar.update(1)
                 self.global_steps += 1
