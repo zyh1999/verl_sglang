@@ -22,12 +22,6 @@ from verl.base_config import BaseConfig
 __all__ = ["OptimizerConfig", "FSDPOptimizerConfig", "McoreOptimizerConfig", "build_optimizer", "VeOmniOptimizerConfig"]
 
 
-_FSDP_OPTIMIZER_ALIASES = {
-    # Keep shell overrides simple: OPTIMIZER=signsgd
-    "signsgd": ("verl.utils.sign_sgd", "SignSGD"),
-}
-
-
 @dataclass
 class OptimizerConfig(BaseConfig):
     """Base optimizer configuration.
@@ -189,23 +183,16 @@ def build_optimizer(parameters, config: FSDPOptimizerConfig):
     if config.override_optimizer_config is not None:
         optimizer_args.update(config.override_optimizer_config)
 
-    optimizer_impl = config.optimizer_impl
-    optimizer_name = config.optimizer
-
-    alias_target = _FSDP_OPTIMIZER_ALIASES.get(config.optimizer.lower())
-    if alias_target is not None:
-        optimizer_impl, optimizer_name = alias_target
-
     try:
-        module = importlib.import_module(optimizer_impl)
-        optimizer_cls = getattr(module, optimizer_name)
+        module = importlib.import_module(config.optimizer_impl)
+        optimizer_cls = getattr(module, config.optimizer)
     except ImportError as e:
         raise ImportError(
-            f"Failed to import module '{optimizer_impl}'. Make sure the package is installed. Error: {e}"
+            f"Failed to import module '{config.optimizer_impl}'. Make sure the package is installed. Error: {e}"
         ) from e
     except AttributeError as e:
         raise AttributeError(
-            f"Optimizer '{optimizer_name}' not found in module '{optimizer_impl}'. "
+            f"Optimizer '{config.optimizer}' not found in module '{config.optimizer_impl}'. "
             f"Available optimizers: {dir(module)}"
         ) from e
 

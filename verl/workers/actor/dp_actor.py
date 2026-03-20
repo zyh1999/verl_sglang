@@ -720,6 +720,7 @@ class DataParallelPPOActor(BasePPOActor):
                 try:
                     hvp_mode = str(self.config.get("hvp_local_graph_mode", "")).lower()
                     hvp_exp = bool(self.config.get("hvp_experimental_local_graph", False))
+                    forced_hvp_params = None
                     if dense_step and hvp_exp and hvp_mode == "lm_head_only":
                         base = self.actor_module
                         for _ in range(6):
@@ -728,9 +729,26 @@ class DataParallelPPOActor(BasePPOActor):
                                 break
                             base = m
                         lm_head_mod = getattr(base, "lm_head", None)
-                        setattr(self.actor_optimizer, "_forced_hvp_params", set(lm_head_mod.parameters()) if lm_head_mod is not None else None)
-                    else:
-                        setattr(self.actor_optimizer, "_forced_hvp_params", None)
+                        if lm_head_mod is not None:
+                            forced_hvp_params = set(lm_head_mod.parameters())
+                    elif dense_step and hvp_mode == "ffn_down_proj_only":
+                        base = self.actor_module
+                        for _ in range(6):
+                            m = getattr(base, "module", None)
+                            if m is None or m is base:
+                                break
+                            base = m
+                        model = getattr(base, "model", None)
+                        layers = getattr(model, "layers", None) if model is not None else None
+                        if layers is not None and len(layers) > 0:
+                            idx = int(self.config.get("hvp_target_layer_idx", -1))
+                            if idx < 0:
+                                idx = len(layers) + idx
+                            if 0 <= idx < len(layers):
+                                mlp = getattr(layers[idx], "mlp", None)
+                                if mlp is not None:
+                                    forced_hvp_params = set(mlp.parameters())
+                    setattr(self.actor_optimizer, "_forced_hvp_params", forced_hvp_params)
                 except Exception:
                     setattr(self.actor_optimizer, "_forced_hvp_params", None)
                 if dense_step and (hasattr(self.actor_optimizer, "set_named_params") or hasattr(self.actor_optimizer, "precond_num_blocks")):
@@ -748,7 +766,10 @@ class DataParallelPPOActor(BasePPOActor):
                             if lm_head is not None:
                                 target_params = set(lm_head.parameters())
                         restore_flags = None
-                        if target_params:
+                        # For ffn_down_proj_only local graph, do not hard-mask requires_grad to
+                        # optimizer-selected blocks; otherwise the proxy layer may be excluded and
+                        # the closure loss becomes non-differentiable.
+                        if target_params and hvp_mode != "ffn_down_proj_only":
                             restore_flags = []
                             for _n, p in self._iter_trainable_named_params():
                                 old_req = bool(p.requires_grad)
@@ -758,8 +779,16 @@ class DataParallelPPOActor(BasePPOActor):
                                 else:
                                     p.requires_grad_(p in target_params)
                         try:
+                            hvp_num_samples = int(self.config.get("hvp_num_samples", 0) or 0)
+                            if hvp_num_samples > 0:
+                                n_total = len(mini_batch)
+                                n_pick = min(hvp_num_samples, n_total)
+                                perm = torch.randperm(n_total, device="cpu")[:n_pick]
+                                hvp_batch = mini_batch[perm.tolist()]
+                            else:
+                                hvp_batch = mini_batch
                             loss = evaluate_ppo_actor_objective_for_hvp(
-                                mini_batch=mini_batch,
+                                mini_batch=hvp_batch,
                                 actor_module=self.actor_module,
                                 config=self.config,
                                 temperature=temperature,
@@ -829,14 +858,19 @@ class DataParallelPPOActor(BasePPOActor):
                                 metrics["_precond_proxy_series"].extend(dense_series)
                                 logged_cnt = len(dense_series)
 
-                        metrics["actor/precond_proxy_update/count_per_step"] = float(logged_cnt)
+                        if hasattr(self.actor_optimizer, "optim_step"):
+                            metrics["actor/precond_proxy_update/optim_step"] = float(self.actor_optimizer.optim_step)
+                        metrics["actor/precond_proxy_count_per_step"] = float(logged_cnt)
 
                         if opt_stats and dense_step and hasattr(self.actor_optimizer, "optim_step"):
                             metrics["actor/precond_proxy_mark/optim_step"] = float(self.actor_optimizer.optim_step)
-                            _m = opt_stats.get("actor/precond_proxy_mean")
-                            _s = opt_stats.get("actor/precond_proxy_std")
-                            _x = opt_stats.get("actor/precond_proxy_max")
-                            _n = opt_stats.get("actor/precond_proxy_n")
+                            if isinstance(opt_stats, dict):
+                                _m = opt_stats.get("actor/precond_proxy_mean")
+                                _s = opt_stats.get("actor/precond_proxy_std")
+                                _x = opt_stats.get("actor/precond_proxy_max")
+                                _n = opt_stats.get("actor/precond_proxy_n")
+                            else:
+                                _m = _s = _x = _n = None
                             if _m is not None:
                                 metrics["actor/precond_proxy_mark/mean"] = _m
                             if _s is not None:
@@ -845,7 +879,6 @@ class DataParallelPPOActor(BasePPOActor):
                                 metrics["actor/precond_proxy_mark/max"] = _x
                             if _n is not None:
                                 metrics["actor/precond_proxy_mark/n"] = _n
-                                metrics[actor/precond_proxy_mark/n] = _n
                     except Exception as _e:
                         if torch.distributed.get_rank() == 0:
                             print(f"[adamw_precond][warn] failed to read optimizer precond stats: {_e}", flush=True)

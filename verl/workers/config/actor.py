@@ -184,9 +184,15 @@ class ActorConfig(BaseConfig):
     # HVP path controls
     hvp_token_stride: int = 1
     hvp_detach_last_block_input: bool = False
-    # HVP local-graph mode: empty(default)/lm_head_only
+    # HVP local-graph mode: empty(default)/lm_head_only/ffn_down_proj_only
     hvp_local_graph_mode: str = ""
     hvp_sampled_softmax_k: int = 0
+    # Chunk size used by local-graph HVP proxy paths to reduce peak memory.
+    hvp_chunk_tokens: int = 64
+    # Target transformer layer index for ffn_down_proj_only proxy (-1 means last layer).
+    hvp_target_layer_idx: int = -1
+    # If >0, randomly sample this many examples (without replacement) from each mini-batch for HVP/precond closure.
+    hvp_num_samples: int = 0
     hvp_experimental_local_graph: bool = False
     hvp_mem_debug: bool = False
     use_kl_loss: bool = False

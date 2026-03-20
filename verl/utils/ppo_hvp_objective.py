@@ -6,6 +6,7 @@ from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id
 from verl.utils.seqlen_balancing import prepare_dynamic_batch
 from verl.utils.torch_functional import logprobs_from_logits_v2
+from verl.utils.hvp_layer_proxy import build_layer_down_proj_proxy_logprob
 
 
 def _unwrap_module(m: torch.nn.Module) -> torch.nn.Module:
@@ -45,6 +46,7 @@ def evaluate_ppo_actor_objective_for_hvp(*, mini_batch: DataProto, actor_module:
     hvp_token_stride = max(int(getattr(config, 'hvp_token_stride', 1)), 1)
     hvp_detach_last_block_input = bool(getattr(config, 'hvp_detach_last_block_input', False))
     hvp_local_graph_mode = str(getattr(config, 'hvp_local_graph_mode', '')).lower()
+    hvp_chunk_tokens = int(getattr(config, 'hvp_chunk_tokens', 64) or 64)
 
     total_objective = None
     for mb in micro_batches:
@@ -158,15 +160,36 @@ def evaluate_ppo_actor_objective_for_hvp(*, mini_batch: DataProto, actor_module:
             else:
                 logits_hvp = logits
 
-        if hvp_local_graph_mode == 'lm_head_only':
+        if hvp_local_graph_mode == 'ffn_down_proj_only':
+            log_prob = build_layer_down_proj_proxy_logprob(
+                actor_module=actor_module,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                pad_token_id=pad_token_id,
+                response_length=response_length,
+                hvp_token_stride=hvp_token_stride,
+                temperature=temperature,
+                chunk_tokens=hvp_chunk_tokens,
+                hvp_target_layer_idx=int(getattr(config, "hvp_target_layer_idx", -1)),
+            )
+        elif hvp_local_graph_mode == 'lm_head_only':
             sampled_k = max(int(getattr(config, 'hvp_sampled_softmax_k', 0)), 0)
             if sampled_k > 0:
                 B, T, _ = hidden_hvp.shape
                 vocab_size = lm_head.weight.size(0)
-                neg_ids = torch.randint(0, vocab_size, (sampled_k,), device=hidden_hvp.device)
+                k = min(sampled_k, vocab_size)
+
+                # Deterministic top-k candidate set (no random negative sampling).
+                # Compute top-k ids on a detached path, then build the HVP graph
+                # only through selected candidate logits.
+                with torch.no_grad():
+                    probe_logits = lm_head(hidden_hvp).div(temperature)
+                    topk_ids = torch.topk(probe_logits, k=k, dim=-1).indices
+
                 cand_ids = torch.cat([
                     responses_hvp.unsqueeze(-1),
-                    neg_ids.view(1, 1, -1).expand(B, T, -1),
+                    topk_ids,
                 ], dim=-1)
                 W = lm_head.weight[cand_ids]
                 logits_cand = (hidden_hvp.unsqueeze(-2) * W).sum(-1)
@@ -179,21 +202,25 @@ def evaluate_ppo_actor_objective_for_hvp(*, mini_batch: DataProto, actor_module:
                 log_prob = logprobs_from_logits_v2(logits_hvp, responses_hvp)
         else:
             log_prob = logprobs_from_logits_v2(logits_hvp, responses_hvp)
-        pg_loss, _ = policy_loss_fn(
-            old_log_prob=old_log_prob_hvp,
-            log_prob=log_prob,
-            advantages=advantages_hvp,
-            response_mask=response_mask_hvp,
-            loss_agg_mode=config.loss_agg_mode,
-            config=config,
-            rollout_is_weights=rollout_is_weights_hvp,
-        )
+        if hvp_local_graph_mode == 'ffn_down_proj_only':
+            # Keep non-zero curvature for HVP: avoid PPO-ratio clipping flattening the proxy.
+            policy_loss = -agg_loss(loss_mat=log_prob, loss_mask=response_mask_hvp, loss_agg_mode=config.loss_agg_mode)
+        else:
+            pg_loss, _ = policy_loss_fn(
+                old_log_prob=old_log_prob_hvp,
+                log_prob=log_prob,
+                advantages=advantages_hvp,
+                response_mask=response_mask_hvp,
+                loss_agg_mode=config.loss_agg_mode,
+                config=config,
+                rollout_is_weights=rollout_is_weights_hvp,
+            )
 
-        policy_loss = pg_loss
-        if config.use_kl_loss:
-            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob_hvp, kl_penalty=config.kl_loss_type)
-            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask_hvp, loss_agg_mode=config.loss_agg_mode)
-            policy_loss = policy_loss + kl_loss * config.kl_loss_coef
+            policy_loss = pg_loss
+            if config.use_kl_loss:
+                kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob_hvp, kl_penalty=config.kl_loss_type)
+                kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask_hvp, loss_agg_mode=config.loss_agg_mode)
+                policy_loss = policy_loss + kl_loss * config.kl_loss_coef
 
         loss_scale_factor = (response_mask_hvp.shape[0] / config.ppo_mini_batch_size) if config.use_dynamic_bsz else (1 / grad_accum)
         contrib = policy_loss * loss_scale_factor
