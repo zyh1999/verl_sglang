@@ -72,6 +72,21 @@ class Tracking:
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
             entity = os.environ.get("WANDB_ENTITY", None)
             wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
+            # Force regular metrics to use explicit training/global_step axis.
+            wandb.define_metric("training/global_step")
+            wandb.define_metric("*", step_metric="training/global_step")
+            # Explicitly pin legacy/default training namespaces to global step.
+            wandb.define_metric("actor/*", step_metric="training/global_step")
+            wandb.define_metric("critic/*", step_metric="training/global_step")
+            wandb.define_metric("response_length/*", step_metric="training/global_step")
+            wandb.define_metric("response/*", step_metric="training/global_step")
+            wandb.define_metric("prompt_length/*", step_metric="training/global_step")
+            wandb.define_metric("num_turns/*", step_metric="training/global_step")
+            wandb.define_metric("timing_s/*", step_metric="training/global_step")
+            wandb.define_metric("timing_per_token_ms/*", step_metric="training/global_step")
+            wandb.define_metric("perf/*", step_metric="training/global_step")
+            wandb.define_metric("global_seqlen/*", step_metric="training/global_step")
+            wandb.define_metric("val/*", step_metric="training/global_step")
             # Define custom x-axis for per-optimizer-step NSR metrics
             wandb.define_metric("adam_nsr/optim_step")
             wandb.define_metric("adam_nsr/*", step_metric="adam_nsr/optim_step")
@@ -86,6 +101,10 @@ class Tracking:
             wandb.define_metric("actor/precond_proxy_update_mid/*", step_metric="actor/precond_proxy_update_mid/optim_step")
             wandb.define_metric("actor/precond_proxy_update_back/optim_step")
             wandb.define_metric("actor/precond_proxy_update_back/*", step_metric="actor/precond_proxy_update_back/optim_step")
+            wandb.define_metric("actor/precond_sharpness/optim_step")
+            wandb.define_metric("actor/precond_sharpness/*", step_metric="actor/precond_sharpness/optim_step")
+            wandb.define_metric("actor/precond_sharpness_raw/optim_step")
+            wandb.define_metric("actor/precond_sharpness_raw/*", step_metric="actor/precond_sharpness_raw/optim_step")
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:
@@ -173,10 +192,24 @@ class Tracking:
         if "file" in default_backend:
             self.logger["file"] = FileLogger(project_name, experiment_name)
 
-    def log(self, data, step, backend=None):
+    def _infer_step_from_data(self, data):
+        if not isinstance(data, dict):
+            return 0
+        if "training/global_step" in data and data["training/global_step"] is not None:
+            return data["training/global_step"]
+        for key, value in data.items():
+            if key.endswith("/optim_step") and value is not None:
+                return value
+        return 0
+
+    def log(self, data, step=None, backend=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
-                logger_instance.log(data=data, step=step)
+                if step is None and default_backend in {"wandb", "swanlab", "vemlp_wandb"}:
+                    logger_instance.log(data=data)
+                else:
+                    resolved_step = self._infer_step_from_data(data) if step is None else step
+                    logger_instance.log(data=data, step=resolved_step)
 
     def __del__(self):
         if "wandb" in self.logger:

@@ -216,7 +216,7 @@ class Signum(Optimizer):
         lr: float = 1e-6,
         momentum: float = 0.9,
         weight_decay: float = 0.0,
-        momentum_safe_eps: float = 1e-5,
+        momentum_safe_eps: float = 1e-8,
         safe_region_lr_scale: float = 10.0,
     ):
         if lr < 0.0:

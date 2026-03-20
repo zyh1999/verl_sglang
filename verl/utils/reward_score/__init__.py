@@ -44,20 +44,20 @@ def default_compute_score(
     # Normalize common dataset aliases from local parquet builders
     ds = str(data_source)
     alias_map = {
-        math_500: HuggingFaceH4/MATH-500,
-        math500: HuggingFaceH4/MATH-500,
-        math_hard: lighteval/MATH,
-        math_in_domain: lighteval/MATH,
-        math_gpqa: searchR1_popqa,
-        math_aime2024: lighteval/MATH,
-        math_aime2025: lighteval/MATH,
+        "math_500": "HuggingFaceH4/MATH-500",
+        "math500": "HuggingFaceH4/MATH-500",
+        "math_hard": "lighteval/MATH",
+        "math_in_domain": "lighteval/MATH",
+        "math_gpqa": "searchR1_popqa",
+        "math_aime2024": "lighteval/MATH",
+        "math_aime2025": "lighteval/MATH",
         # backward-compatible aliases
-        serl_math_500: HuggingFaceH4/MATH-500,
-        serl_math_hard: lighteval/MATH,
-        serl_math_in_domain: lighteval/MATH,
-        serl_math_gpqa: searchR1_popqa,
-        serl_math_aime2024: lighteval/MATH,
-        serl_math_aime2025: lighteval/MATH,
+        "serl_math_500": "HuggingFaceH4/MATH-500",
+        "serl_math_hard": "lighteval/MATH",
+        "serl_math_in_domain": "lighteval/MATH",
+        "serl_math_gpqa": "searchR1_popqa",
+        "serl_math_aime2024": "lighteval/MATH",
+        "serl_math_aime2025": "lighteval/MATH",
     }
     data_source = alias_map.get(ds, ds)
 

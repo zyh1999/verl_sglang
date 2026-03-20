@@ -14,25 +14,28 @@ def _unwrap_module(m: torch.nn.Module) -> torch.nn.Module:
     return cur
 
 
-def _find_last_down_proj(actor_module: torch.nn.Module) -> torch.nn.Module:
+def _find_mlp_by_layer_idx(actor_module: torch.nn.Module, layer_idx: int = -1):
     base = _unwrap_module(actor_module)
     model = getattr(base, "model", None)
-    if model is not None and getattr(model, "layers", None) is not None and len(model.layers) > 0:
-        last = model.layers[-1]
-    else:
-        raise RuntimeError("cannot find model.layers[-1] for ffn down_proj hvp proxy")
+    if model is None or getattr(model, "layers", None) is None or len(model.layers) == 0:
+        raise RuntimeError("cannot find model.layers for ffn down_proj hvp proxy")
 
-    mlp = getattr(last, "mlp", None)
+    n_layers = len(model.layers)
+    idx = int(layer_idx)
+    if idx < 0:
+        idx = n_layers + idx
+    if idx < 0 or idx >= n_layers:
+        raise RuntimeError(f"invalid hvp_target_layer_idx={layer_idx}, n_layers={n_layers}")
+
+    target = model.layers[idx]
+    mlp = getattr(target, "mlp", None)
     if mlp is None:
-        raise RuntimeError("last transformer block has no mlp")
+        raise RuntimeError(f"transformer layer[{idx}] has no mlp")
 
-    down_proj = getattr(mlp, "down_proj", None)
-    if down_proj is None:
-        raise RuntimeError("last transformer block mlp has no down_proj")
-    return down_proj
+    return mlp, idx, n_layers
 
 
-def build_last_down_proj_proxy_logprob(
+def build_layer_down_proj_proxy_logprob(
     *,
     actor_module: torch.nn.Module,
     input_ids: torch.Tensor,
@@ -43,8 +46,9 @@ def build_last_down_proj_proxy_logprob(
     hvp_token_stride: int,
     temperature: float,
     chunk_tokens: int = 64,
+    hvp_target_layer_idx: int = -1,
 ) -> torch.Tensor:
-    down_proj = _find_last_down_proj(actor_module)
+    mlp, actual_idx, _ = _find_mlp_by_layer_idx(actor_module, hvp_target_layer_idx)
 
     captured: dict[str, torch.Tensor] = {}
 
@@ -55,7 +59,20 @@ def build_last_down_proj_proxy_logprob(
         if isinstance(x0, torch.Tensor):
             captured["x"] = x0.detach()
 
-    hook = down_proj.register_forward_pre_hook(_pre_hook)
+    down_proj = getattr(mlp, "down_proj", None)
+    if down_proj is None:
+        raise RuntimeError(f"transformer layer[{actual_idx}] mlp has no down_proj")
+
+    gate_proj = getattr(mlp, "gate_proj", None)
+    up_proj = getattr(mlp, "up_proj", None)
+    if gate_proj is None or up_proj is None:
+        raise RuntimeError(f"transformer layer[{actual_idx}] mlp missing gate_proj/up_proj")
+
+    act_fn = getattr(mlp, "act_fn", None)
+    if act_fn is None:
+        act_fn = F.silu
+
+    hook = mlp.register_forward_pre_hook(_pre_hook)
     try:
         with torch.no_grad():
             _ = actor_module(
@@ -70,7 +87,7 @@ def build_last_down_proj_proxy_logprob(
 
     x = captured.get("x", None)
     if x is None:
-        raise RuntimeError("failed to capture last down_proj input activation")
+        raise RuntimeError(f"failed to capture layer[{actual_idx}] mlp input activation")
 
     x = x[:, -response_length - 1 : -1, :]
     if hvp_token_stride > 1:
@@ -81,16 +98,36 @@ def build_last_down_proj_proxy_logprob(
     if chunk_tokens <= 0:
         chunk_tokens = T
 
-    for s in range(0, T, chunk_tokens):
-        e = min(s + chunk_tokens, T)
-        xc = x[:, s:e, :]
-        target_dtype = down_proj.weight.dtype
-        if xc.dtype != target_dtype:
-            xc = xc.to(target_dtype)
-        y = F.linear(xc, down_proj.weight, down_proj.bias)
-        proxy = 0.5 * y.float().pow(2).mean(dim=-1)
-        if temperature != 1.0:
-            proxy = proxy / float(temperature)
-        outs.append(proxy)
+    # Keep proxy loss connected to trainable params so autograd/HVP never sees an all-None first-order set.
+    # Zero-valued anchors do not change loss magnitude or logging-axis semantics.
+    anchor = None
+    for p in actor_module.parameters():
+        if p is not None and p.requires_grad:
+            z = p.reshape(-1)[0] * 0.0
+            anchor = z if anchor is None else (anchor + z)
+
+    with torch.enable_grad():
+        for s in range(0, T, chunk_tokens):
+            e = min(s + chunk_tokens, T)
+            xc = x[:, s:e, :]
+            target_dtype = down_proj.weight.dtype
+            if xc.dtype != target_dtype:
+                xc = xc.to(target_dtype)
+            xc = xc.float()
+            gate = F.linear(xc, gate_proj.weight.float(), (None if gate_proj.bias is None else gate_proj.bias.float()))
+            up = F.linear(xc, up_proj.weight.float(), (None if up_proj.bias is None else up_proj.bias.float()))
+            hidden = act_fn(gate) * up
+            y = F.linear(hidden, down_proj.weight.float(), (None if down_proj.bias is None else down_proj.bias.float()))
+            proxy = 0.5 * y.float().pow(2).mean(dim=-1)
+            if temperature != 1.0:
+                proxy = proxy / float(temperature)
+            if anchor is not None:
+                proxy = proxy + anchor
+            outs.append(proxy)
 
     return torch.cat(outs, dim=1)
+
+
+def build_last_down_proj_proxy_logprob(**kwargs):
+    kwargs.setdefault("hvp_target_layer_idx", -1)
+    return build_layer_down_proj_proxy_logprob(**kwargs)

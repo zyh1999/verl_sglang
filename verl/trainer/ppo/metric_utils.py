@@ -609,9 +609,23 @@ def process_validation_metrics(
                         ns_cache[n_resps] = gen_ns(n_resps)
                     ns = ns_cache[n_resps]
 
-                    # compute best/worst metrics
+
+                    # compute mean/best/worst metrics for subset size n
                     for n in ns:
-                        # compute best/worst metrics
+                        # mean@n for n < n_resps via bootstrap subset mean;
+                        # for n == n_resps, keep exact mean/std already stored above.
+                        if n < n_resps:
+                            [(mean_n_mean, mean_n_std)] = bootstrap_metric(
+                                data=var_vals,
+                                subset_size=n,
+                                reduce_fns=[np.mean],
+                                n_bootstrap=n_bootstrap,
+                                seed=seed,
+                            )
+                            metric[f"mean@{n}"] = mean_n_mean
+                            metric[f"std@{n}"] = mean_n_std
+
+                        # best/worst@n
                         (bon_mean, bon_std), (won_mean, won_std) = bootstrap_metric(
                             data=var_vals,
                             subset_size=n,

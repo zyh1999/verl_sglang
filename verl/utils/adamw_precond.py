@@ -77,12 +77,12 @@ class AdamWPrecond(torch.optim.AdamW):
         chosen = self._pick_three_blocks()
 
         hvp_mode = os.getenv("HVP_LOCAL_GRAPH_MODE", "").lower()
-        if hvp_mode == "lm_head_only":
-            forced_params = getattr(self, "_forced_hvp_params", None)
+        forced_params = getattr(self, "_forced_hvp_params", None)
+        if forced_params:
+            chosen = {"target": ("forced", list(forced_params))}
+        elif hvp_mode == "lm_head_only":
             lm_params = [p for (n, p) in self._named_params_cache if (p is not None and "lm_head" in n)]
-            if forced_params:
-                chosen = {"back": ("lm_head", list(forced_params))}
-            elif lm_params:
+            if lm_params:
                 chosen = {"back": ("lm_head", lm_params)}
             elif "back" in chosen:
                 chosen = {"back": chosen["back"]}
@@ -150,6 +150,10 @@ class AdamWPrecond(torch.optim.AdamW):
                 f"{family}/std": 0.0,
                 f"{family}/max": float(lam),
                 f"{family}/n": float(len(blk_params)),
+                f"{self.precond_stat_prefix}/precond_sharpness/optim_step": float(self.optim_step),
+                f"{self.precond_stat_prefix}/precond_sharpness/{tag}": float(lam),
+                f"{self.precond_stat_prefix}/precond_sharpness_raw/optim_step": float(self.optim_step),
+                f"{self.precond_stat_prefix}/precond_sharpness_raw/{tag}": float(lam_raw),
             }
             dense_payloads.append(payload)
 
@@ -166,8 +170,6 @@ class AdamWPrecond(torch.optim.AdamW):
             f"{self.precond_stat_prefix}/precond_proxy_raw_mean": float(sum(raw_vals) / len(raw_vals)),
             f"{self.precond_stat_prefix}/precond_proxy_raw_max": float(max(raw_vals)),
         }
-        for tag, v in per_block.items():
-            stats[f"{self.precond_stat_prefix}/precond_sharpness/{tag}"] = float(v)
 
         self._last_precond_stats = stats
         self._dense_series_buffer.extend(dense_payloads)

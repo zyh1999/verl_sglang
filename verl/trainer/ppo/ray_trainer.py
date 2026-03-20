@@ -1769,7 +1769,9 @@ class RayPPOTrainer:
                     self.train_dataloader.sampler.update(batch=batch)
 
                 # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps)
+                # Avoid W&B global-step regressions when per-optim-step series are logged in-between.
+                # Keep training/global_step inside metrics and let backend infer/auto-step.
+                logger.log(data=metrics)
 
                 # Log per-optimizer-step NSR with custom x-axis (optim_step)
                 # Keep "adam_nsr/optim_step" in data so wandb.define_metric(step_metric="adam_nsr/optim_step") can draw line charts
@@ -1782,7 +1784,7 @@ class RayPPOTrainer:
                             continue
                         if "adam_nsr/optim_step" not in nsr_entry or not nsr_entry:
                             continue
-                        logger.log(data=nsr_entry, step=self.global_steps)
+                        logger.log(data=nsr_entry)
 
                 # Log per-optimizer-step critical sharpness with custom x-axis (optim_step)
                 # Keep actor/critical_sharpness_optim_step in data so wandb.define_metric(step_metric=...) can draw line charts
@@ -1795,7 +1797,7 @@ class RayPPOTrainer:
                             continue
                         if "actor/critical_step/optim_step" not in sharp_entry or not sharp_entry:
                             continue
-                        logger.log(data=sharp_entry, step=int(sharp_entry["actor/critical_step/optim_step"]))
+                        logger.log(data=sharp_entry)
 
 
                 # Log per-optimizer-step precond-proxy series with custom x-axis (optim_step)
@@ -1817,7 +1819,7 @@ class RayPPOTrainer:
                             }
                         if "actor/precond_proxy_update/optim_step" not in payload or not payload:
                             continue
-                        logger.log(data=payload, step=int(payload["actor/precond_proxy_update/optim_step"]))
+                        logger.log(data=payload)
 
                 progress_bar.update(1)
                 self.global_steps += 1

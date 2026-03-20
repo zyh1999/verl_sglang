@@ -6,7 +6,7 @@ from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id
 from verl.utils.seqlen_balancing import prepare_dynamic_batch
 from verl.utils.torch_functional import logprobs_from_logits_v2
-from verl.utils.hvp_layer_proxy import build_last_down_proj_proxy_logprob
+from verl.utils.hvp_layer_proxy import build_layer_down_proj_proxy_logprob
 
 
 def _unwrap_module(m: torch.nn.Module) -> torch.nn.Module:
@@ -161,7 +161,7 @@ def evaluate_ppo_actor_objective_for_hvp(*, mini_batch: DataProto, actor_module:
                 logits_hvp = logits
 
         if hvp_local_graph_mode == 'ffn_down_proj_only':
-            log_prob = build_last_down_proj_proxy_logprob(
+            log_prob = build_layer_down_proj_proxy_logprob(
                 actor_module=actor_module,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -171,6 +171,7 @@ def evaluate_ppo_actor_objective_for_hvp(*, mini_batch: DataProto, actor_module:
                 hvp_token_stride=hvp_token_stride,
                 temperature=temperature,
                 chunk_tokens=hvp_chunk_tokens,
+                hvp_target_layer_idx=int(getattr(config, "hvp_target_layer_idx", -1)),
             )
         elif hvp_local_graph_mode == 'lm_head_only':
             sampled_k = max(int(getattr(config, 'hvp_sampled_softmax_k', 0)), 0)
@@ -201,21 +202,25 @@ def evaluate_ppo_actor_objective_for_hvp(*, mini_batch: DataProto, actor_module:
                 log_prob = logprobs_from_logits_v2(logits_hvp, responses_hvp)
         else:
             log_prob = logprobs_from_logits_v2(logits_hvp, responses_hvp)
-        pg_loss, _ = policy_loss_fn(
-            old_log_prob=old_log_prob_hvp,
-            log_prob=log_prob,
-            advantages=advantages_hvp,
-            response_mask=response_mask_hvp,
-            loss_agg_mode=config.loss_agg_mode,
-            config=config,
-            rollout_is_weights=rollout_is_weights_hvp,
-        )
+        if hvp_local_graph_mode == 'ffn_down_proj_only':
+            # Keep non-zero curvature for HVP: avoid PPO-ratio clipping flattening the proxy.
+            policy_loss = -agg_loss(loss_mat=log_prob, loss_mask=response_mask_hvp, loss_agg_mode=config.loss_agg_mode)
+        else:
+            pg_loss, _ = policy_loss_fn(
+                old_log_prob=old_log_prob_hvp,
+                log_prob=log_prob,
+                advantages=advantages_hvp,
+                response_mask=response_mask_hvp,
+                loss_agg_mode=config.loss_agg_mode,
+                config=config,
+                rollout_is_weights=rollout_is_weights_hvp,
+            )
 
-        policy_loss = pg_loss
-        if config.use_kl_loss and hvp_local_graph_mode != 'ffn_down_proj_only':
-            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob_hvp, kl_penalty=config.kl_loss_type)
-            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask_hvp, loss_agg_mode=config.loss_agg_mode)
-            policy_loss = policy_loss + kl_loss * config.kl_loss_coef
+            policy_loss = pg_loss
+            if config.use_kl_loss:
+                kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob_hvp, kl_penalty=config.kl_loss_type)
+                kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask_hvp, loss_agg_mode=config.loss_agg_mode)
+                policy_loss = policy_loss + kl_loss * config.kl_loss_coef
 
         loss_scale_factor = (response_mask_hvp.shape[0] / config.ppo_mini_batch_size) if config.use_dynamic_bsz else (1 / grad_accum)
         contrib = policy_loss * loss_scale_factor
