@@ -1,19 +1,25 @@
 #!/bin/bash --login
 #SBATCH -p gpuH
 #SBATCH --account gpu-h200-fse-pgdr     
-#SBATCH -G 2
+#SBATCH -G 1
 #SBATCH -t 4-0
 #SBATCH -n 1
 #SBATCH -c 8
 #SBATCH --mem=120G
 
 module purge
-module load libs/cuda/12.6.2  
+module load libs/cuda/12.8.1  
 module load miniforge
 
 conda activate verl
 cd ~/scratch/verl_sglang
 
-export CUDA_VISIBLE_DEVICES=0,1
+export RAY_memory_usage_threshold=0.9
+export RAY_memory_monitor_refresh_ms=1000
 
-sh examples/RL_math/run_qwen2.5-3b_math_grpo.sh
+export CUDA_VISIBLE_DEVICES=0
+
+# sh examples/RL_math/run_qwen2.5-3b_math_grpo.sh
+# OPTIMIZER=signsgd bash examples/RL_math/run_qwen2.5-3b_math_grpo.sh \
+sh examples/RL_math/run_llama3.2-3b-math-grpo.sh
+

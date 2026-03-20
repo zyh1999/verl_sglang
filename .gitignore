@@ -133,3 +133,7 @@ logs
 log
 outputs
 .history
+
+slurm-*.out
+run_A
+run_exp

@@ -76,6 +76,7 @@ train_prompt_bsz="${TRAIN_PROMPT_BSZ:-64}"
 train_prompt_mini_bsz="${TRAIN_PROMPT_MINI_BSZ:-16}"
 micro_batch_size_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-16}"
 ppo_epochs="${PPO_EPOCHS:-3}"
+optimizer_name="${OPTIMIZER:-AdamW}"
 
 project_name="${PROJECT_NAME:-verl_new}"
 exp_name="${EXP_NAME:-qwen2.5_3b_train_gsm8k+math_val_math500+math_hard_grpo_epochs_${ppo_epochs}_no_clip}"
@@ -135,6 +136,7 @@ echo "model=${MODEL_PATH}"
 echo "train_files=${train_files}"
 echo "max_prompt_length=${max_prompt_length}, max_response_length=${max_response_length}"
 echo "train_bsz=${train_prompt_bsz}, mini_bsz=${train_prompt_mini_bsz}, micro_bsz/gpu=${micro_batch_size_per_gpu}"
+echo "optimizer=${optimizer_name}"
 echo "ppo_epochs=${ppo_epochs}"
 echo "n=${n_resp_per_prompt}, temp=${temperature}, top_p=${top_p}, top_k=${top_k}"
 echo "val_n=${val_n}, val_do_sample=${val_do_sample}, val_temp=${val_temperature}, val_top_p=${val_top_p}, val_top_k=${val_top_k}"
@@ -162,6 +164,7 @@ echo "============================================================"
   actor_rollout_ref.actor.ppo_epochs="${ppo_epochs}" \
   actor_rollout_ref.actor.ppo_mini_batch_size="${train_prompt_mini_bsz}" \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${micro_batch_size_per_gpu}" \
+  actor_rollout_ref.actor.optim.optimizer="${optimizer_name}" \
   actor_rollout_ref.actor.use_kl_loss="${use_kl_loss}" \
   actor_rollout_ref.actor.kl_loss_coef="${kl_loss_coef}" \
   actor_rollout_ref.actor.kl_loss_type="${kl_loss_type}" \
@@ -203,4 +206,3 @@ echo "============================================================"
   trainer.resume_from_path=null \
   trainer.default_local_dir="${out_dir}" \
   "$@" 2>&1 | tee "${out_dir}/${project_name}_${exp_name}_grpo.log"
-

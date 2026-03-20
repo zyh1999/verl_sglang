@@ -15,7 +15,7 @@ export PATH="${CUDA_HOME}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 
 # ============================================================
-# verl GRPO Example: Qwen2.5-3B-Instruct (Math)
+# verl GRPO Example: Llama-3.2-3B-Instruct (Math)
 # - 除模型本身配置外，尽量保持第二份脚本写法
 # - 入口保持 verl：python -m verl.trainer.main_ppo
 # ============================================================
@@ -32,7 +32,7 @@ gsm8k_test_path="${GSM8K_TEST_PATH:-$data_root/gsm8k/test.parquet}"
 # 训练用的 “math7500”：使用 SeRL 提供的 7.5k GT（data/math_task/train.parquet）
 math_train_path="${MATH_TRAIN_PATH:-$data_root/math_task/train.parquet}"
 math_test_path="${MATH_TEST_PATH:-$data_root/math_task/test.parquet}"
-# math500_test_path="${MATH500_TEST_PATH:-$data_root/math_task/test.parquet}"
+amath500_test_path="${MATH500_TEST_PATH:-$data_root/math_task/test.parquet}"
 math_hard_test_path="${MATH_HARD_TEST_PATH:-$data_root/math_task_hard/test.parquet}"
 aime2024_test_path="${AIME2024_TEST_PATH:-$data_root/math_task_aime2024/test.parquet}"
 aime2025_test_path="${AIME2025_TEST_PATH:-$data_root/math_task_aime2025/test.parquet}"
@@ -64,9 +64,9 @@ if [[ -n "${TEST_FILES:-}" ]]; then
   test_files="${TEST_FILES}"
 else
   val_candidates=(
-    "${math_test_path}"
-    # "${math500_test_path}"
-    # "${math_hard_test_path}"
+    # "${math_test_path}"
+    "${math500_test_path}"
+    "${math_hard_test_path}"
     # "${aime2024_test_path}"
     # "${aime2025_test_path}"
     # "${gpqa_test_path}"
@@ -86,12 +86,12 @@ else
   test_files="$(build_hydra_list "${existing_val_files[@]}")"
 fi
 
-# 模型（与第一份统一）
+# 模型（改成 Llama3.2 3B）
 if [[ $# -gt 0 && "${1}" != -* ]]; then
   MODEL_PATH="${1}"
   shift
 else
-  MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}"
+  MODEL_PATH="${MODEL_PATH:-meta-llama/Llama-3.2-3B-Instruct}"
 fi
 
 # 长度配置
@@ -107,7 +107,7 @@ optimizer_name="${OPTIMIZER:-AdamW}"
 
 project_name="${PROJECT_NAME:-verl_new}"
 # 默认 run 名
-exp_name="${EXP_NAME:-qwen2.5_3b_train_gsm8k+math_val_math500+math_hard_grpo_epochs_${ppo_epochs}}"
+exp_name="${EXP_NAME:-llama3.2_3b_train_gsm8k+math_val_math500+math_hard_grpo_epochs_${ppo_epochs}}"
 
 # Algorithm
 adv_estimator="${ADV_ESTIMATOR:-grpo}"
@@ -173,7 +173,7 @@ out_dir="${OUT_DIR:-${ROOT_DIR}/outputs/${project_name}/${exp_name}}"
 mkdir -p "${out_dir}"
 
 echo "============================================================"
-echo "[verl][GRPO] Qwen2.5-3B"
+echo "[verl][GRPO] Llama-3.2-3B"
 echo "project_name=${project_name}"
 echo "exp_name=${exp_name}"
 echo "model=${MODEL_PATH}"
@@ -208,7 +208,12 @@ echo "============================================================"
   actor_rollout_ref.actor.ppo_epochs="${ppo_epochs}" \
   actor_rollout_ref.actor.ppo_mini_batch_size="${train_prompt_mini_bsz}" \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${micro_batch_size_per_gpu}" \
-  actor_rollout_ref.actor.optim.optimizer="${optimizer_name}" \
+  actor_rollout_ref.actor.optim.optimizer=Signum \
+  actor_rollout_ref.actor.optim.optimizer_impl=verl.utils.sign_sgd \
+  actor_rollout_ref.actor.optim.lr=3e-7 \
+  +actor_rollout_ref.actor.optim.override_optimizer_config.momentum=0.92 \
+  actor_rollout_ref.actor.optim.weight_decay=0.01 \
+  +actor_rollout_ref.actor.log_adam_snr=True \
   actor_rollout_ref.actor.use_kl_loss="${use_kl_loss}" \
   actor_rollout_ref.actor.kl_loss_coef="${kl_loss_coef}" \
   actor_rollout_ref.actor.kl_loss_type="${kl_loss_type}" \
@@ -245,7 +250,7 @@ echo "============================================================"
   trainer.val_subset_resample_each_eval="${val_subset_resample_each_eval}" \
   trainer.logger='["console","wandb"]' \
   trainer.project_name="${project_name}" \
-  trainer.experiment_name="${exp_name}_${optimizer_name}" \
+  trainer.experiment_name="${exp_name}_${optimizer_name}_beta0.92" \
   trainer.n_gpus_per_node="${NGPUS_PER_NODE:-1}" \
   trainer.nnodes="${nnodes}" \
   trainer.save_freq="${SAVE_FREQ:-100}" \

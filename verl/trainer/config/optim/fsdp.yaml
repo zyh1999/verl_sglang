@@ -1,11 +1,12 @@
 # Target class for this configuration
 _target_: verl.workers.config.FSDPOptimizerConfig
 
-# Optimizer class name (e.g., "AdamW", "AdamW8bit", "_AdamW", "Adam")
+# Optimizer class name (e.g., "AdamW", "AdamW8bit", "_AdamW", "Adam", "signsgd")
 optimizer: AdamW
 
 # Module path to import optimizer
 # Examples: "torch.optim", "torchao.optim", "bitsandbytes.optim"
+# Note: aliases like "signsgd" are resolved automatically by the builder.
 optimizer_impl: torch.optim
 
 # Learning rate
