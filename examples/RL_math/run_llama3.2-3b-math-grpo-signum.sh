@@ -32,7 +32,7 @@ gsm8k_test_path="${GSM8K_TEST_PATH:-$data_root/gsm8k/test.parquet}"
 # 训练用的 “math7500”：使用 SeRL 提供的 7.5k GT（data/math_task/train.parquet）
 math_train_path="${MATH_TRAIN_PATH:-$data_root/math_task/train.parquet}"
 math_test_path="${MATH_TEST_PATH:-$data_root/math_task/test.parquet}"
-amath500_test_path="${MATH500_TEST_PATH:-$data_root/math_task/test.parquet}"
+math500_test_path="${MATH500_TEST_PATH:-$data_root/math_task/test.parquet}"
 math_hard_test_path="${MATH_HARD_TEST_PATH:-$data_root/math_task_hard/test.parquet}"
 aime2024_test_path="${AIME2024_TEST_PATH:-$data_root/math_task_aime2024/test.parquet}"
 aime2025_test_path="${AIME2025_TEST_PATH:-$data_root/math_task_aime2025/test.parquet}"
@@ -210,8 +210,8 @@ echo "============================================================"
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${micro_batch_size_per_gpu}" \
   actor_rollout_ref.actor.optim.optimizer=Signum \
   actor_rollout_ref.actor.optim.optimizer_impl=verl.utils.sign_sgd \
-  actor_rollout_ref.actor.optim.lr=3e-7 \
-  +actor_rollout_ref.actor.optim.override_optimizer_config.momentum=0.92 \
+  actor_rollout_ref.actor.optim.lr=1e-6 \
+  +actor_rollout_ref.actor.optim.override_optimizer_config.momentum=0.9 \
   actor_rollout_ref.actor.optim.weight_decay=0.01 \
   +actor_rollout_ref.actor.log_adam_snr=True \
   actor_rollout_ref.actor.use_kl_loss="${use_kl_loss}" \
@@ -250,7 +250,7 @@ echo "============================================================"
   trainer.val_subset_resample_each_eval="${val_subset_resample_each_eval}" \
   trainer.logger='["console","wandb"]' \
   trainer.project_name="${project_name}" \
-  trainer.experiment_name="${exp_name}_${optimizer_name}_beta0.92" \
+  trainer.experiment_name="${exp_name}_${optimizer_name}_${LR}_beta0.92" \
   trainer.n_gpus_per_node="${NGPUS_PER_NODE:-1}" \
   trainer.nnodes="${nnodes}" \
   trainer.save_freq="${SAVE_FREQ:-100}" \

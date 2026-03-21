@@ -208,8 +208,10 @@ echo "============================================================"
   actor_rollout_ref.actor.ppo_epochs="${ppo_epochs}" \
   actor_rollout_ref.actor.ppo_mini_batch_size="${train_prompt_mini_bsz}" \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${micro_batch_size_per_gpu}" \
-  actor_rollout_ref.actor.optim.optimizer="${optimizer_name}" \
-  actor_rollout_ref.actor.optim.betas=[0.9,0.999]  \
+  actor_rollout_ref.actor.optim.optimizer=SignSGD \
+  actor_rollout_ref.actor.optim.optimizer_impl=verl.utils.sign_sgd \
+  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.actor.optim.weight_decay=0.01 \
   +actor_rollout_ref.actor.log_adam_snr=True \
   actor_rollout_ref.actor.use_kl_loss="${use_kl_loss}" \
   actor_rollout_ref.actor.kl_loss_coef="${kl_loss_coef}" \
@@ -247,7 +249,7 @@ echo "============================================================"
   trainer.val_subset_resample_each_eval="${val_subset_resample_each_eval}" \
   trainer.logger='["console","wandb"]' \
   trainer.project_name="${project_name}" \
-  trainer.experiment_name="${exp_name}_${optimizer_name}_beta0.90.999" \ ############
+  trainer.experiment_name="${exp_name}_${optimizer_name}_${LR}" \
   trainer.n_gpus_per_node="${NGPUS_PER_NODE:-1}" \
   trainer.nnodes="${nnodes}" \
   trainer.save_freq="${SAVE_FREQ:-100}" \

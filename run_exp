@@ -21,5 +21,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 # sh examples/RL_math/run_qwen2.5-3b_math_grpo.sh
 # OPTIMIZER=signsgd bash examples/RL_math/run_qwen2.5-3b_math_grpo.sh \
-sh examples/RL_math/run_llama3.2-3b-math-grpo.sh
+# sh examples/RL_math/run_llama3.2-3b-math-grpo.sh
+# sh examples/RL_math/run_llama3.2-3b-math-grpo-signum.sh
+sh examples/RL_math/run_llama3.2-3b-math-grpo-signsgd.sh
 
